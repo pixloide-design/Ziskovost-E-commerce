@@ -1,11 +1,13 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 
+# Nastavení stránky
+st.set_page_config(page_title="Ziskovost E-shopu", layout="wide")
+
 # --- KONFIGURACE ---
-HESLO_PRO_VSTUP = "mojeheslo123" 
-SHEET_ID = "1KQXP_5hkEBOXUDLMZR1CdSsdMf8BU72kPxEFaXdNjSY"
-# Odkaz pro čtení (veřejný export)
-URL_CSV = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+HESLO_PRO_VSTUP = "mojeheslo123"
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1KQXP_5hkEBOXUDLMZR1CdSsdMf8BU72kPxEFaXdNjSY/edit?usp=sharing"
 
 def check_password():
     if "authenticated" not in st.session_state:
@@ -23,84 +25,101 @@ def check_password():
     return True
 
 if check_password():
-    st.set_page_config(page_title="Ziskovost E-shopu", layout="wide")
-    st.title("💸 Výpočet zisku (Verze bez API)")
+    # Propojení s Google Sheets
+    # POZOR: V Secrets musíš mít nastavený Service Account klíč!
+    conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # 1. NAČTENÍ CENÍKU (Z Google Tabulky)
+    st.title("💸 Výpočet zisku a správa cen")
+
+    with st.expander("❓ NÁPOVĚDA A TAHÁK"):
+        st.markdown("""
+        1. **Nahrajte orders.csv** - program načte všechny prodeje.
+        2. **Doplňte NC** - u produktů, které svítí červeně (NC 0), doplňte nákupní cenu.
+        3. **Uložte** - tlačítko uloží ceny do Google tabulky pro všechna budoucí použití.
+        """)
+
+    # Načtení dat z tabulky
     try:
-        pamet_df = pd.read_csv(URL_CSV)
+        pamet_df = conn.read(spreadsheet=SHEET_URL)
         pamet_df['itemCode'] = pamet_df['itemCode'].astype(str)
         pamet_df = pamet_df.drop_duplicates(subset=['itemCode'], keep='last')
     except:
         pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
-    with st.expander("ℹ️ NÁPOVĚDA"):
-        st.write("1. Zadejte náklady. 2. Nahrajte orders.csv. 3. Doplňte ceny u produktů, které je nemají (svítí tam 0).")
-
-    # 2. VSTUPY
-    st.subheader("1. Fixní náklady")
+    # Vstupy nákladů
+    st.subheader("1. Ostatní náklady")
     c1, c2 = st.columns(2)
-    mkt = c1.number_input("Marketing (Kč):", value=0.0)
-    doprava = c2.number_input("Doprava faktura (Kč):", value=0.0)
+    mkt = c1.number_input("Marketing (Kč bez DPH):", value=0.0)
+    doprava_faktura = c2.number_input("Doprava faktura (Kč bez DPH):", value=0.0)
 
-    # 3. SOUBOR
-    uploaded_file = st.file_uploader("2. Nahrajte orders.csv", type=['csv'])
+    # Nahrání souboru
+    uploaded_file = st.file_uploader("2. Nahrajte export objednávek (CSV)", type=['csv'])
 
     if uploaded_file:
         df = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='cp1250')
+        
+        # Čištění dat z e-shopu
         df['itemTotalPriceWithoutVat'] = pd.to_numeric(df['itemTotalPriceWithoutVat'], errors='coerce').fillna(0)
         df['itemAmount'] = pd.to_numeric(df['itemAmount'], errors='coerce').fillna(1)
         df['itemCode'] = df['itemCode'].astype(str)
 
-        # Seznam všech unikátních věcí v objednávce
+        # Spárování s ceníkem
         vsechny_produkty = df.drop_duplicates(subset=['itemCode', 'itemName'])[['itemCode', 'itemName']].copy()
-        
-        # Spojíme s tím, co už známe z Google tabulky
-        pracovni_cenik = pd.merge(vsechny_produkty, pamet_df, on='itemCode', how='left')
-        pracovni_cenik['nakupni_cena'] = pracovni_cenik['nakupni_cena'].fillna(0.0)
-        pracovni_cenik['koeficient'] = pracovni_cenik['koeficient'].fillna(1.0)
+        spojeno = pd.merge(vsechny_produkty, pamet_df, on='itemCode', how='left')
+        spojeno['nakupni_cena'] = spojeno['nakupni_cena'].fillna(0.0)
+        spojeno['koeficient'] = spojeno['koeficient'].fillna(1.0)
 
-        st.write("### 📝 Kontrola nákupních cen")
-        st.info("Upravte ceny tam, kde je nula. Tyto ceny se použijí pro výpočet u VŠECH položek v objednávkách.")
-        
-        # Editor - TADY UŽIVATEL DOPLNÍ CENY
-        final_cenik_z_webu = st.data_editor(
-            pracovni_cenik,
+        st.subheader("3. Kontrola nákupních cen")
+        # Zvýraznění chybějících cen
+        def highlight_zeros(val):
+            color = 'red' if val == 0 else 'black'
+            return f'color: {color}'
+
+        editor_data = st.data_editor(
+            spojeno,
             column_config={
                 "itemCode": "Kód",
-                "itemName": "Název",
-                "nakupni_cena": "NC bez DPH (Kč)",
+                "itemName": "Produkt",
+                "nakupni_cena": st.column_config.NumberColumn("NC bez DPH", format="%.2f Kč"),
                 "koeficient": "Koeficient"
             },
             hide_index=True,
             use_container_width=True
         )
 
-        if st.button("🚀 SPOČÍTAT KOMPLETNÍ ZISK", type="primary"):
-            # KLÍČOVÝ MOMENT: Vezmeme ÚPLNĚ VŠECHNY objednávky z CSV
-            # a ke každé jedné položce přiřadíme cenu z toho, co je v editoru
+        if st.button("🚀 SPOČÍTAT ZISK A ULOŽIT CENY", type="primary"):
+            # A) AKTUALIZACE GOOGLE TABULKY
+            nove_ceny = editor_data[['itemCode', 'nakupni_cena', 'koeficient']].copy()
+            final_pro_ulozeni = pd.concat([pamet_df, nove_ceny]).drop_duplicates(subset=['itemCode'], keep='last')
             
-            ceny_pro_vypocet = final_cenik_z_webu[['itemCode', 'nakupni_cena', 'koeficient']]
-            
-            # Spojení 1:1 - každá položka v objednávce dostane svou cenu
-            vypocet_vse = pd.merge(df, ceny_pro_vypocet, on='itemCode', how='left')
-            
-            # Výpočet nákladů pro každý řádek: (množství * NC * koeficient)
-            vypocet_vse['naklad_radek'] = vypocet_vse['itemAmount'] * vypocet_vse['nakupni_cena'] * vypocet_vse['koeficient']
-            
-            # CELKOVÉ SUMY
-            celkove_trzby = vypocet_vse['itemTotalPriceWithoutVat'].sum()
-            celkove_naklady_zbozi = vypocet_vse['naklad_radek'].sum()
-            zisk = celkove_trzby - celkove_naklady_zbozi - mkt - doprava
+            try:
+                conn.update(spreadsheet=SHEET_URL, data=final_pro_ulozeni)
+                st.success("✅ Ceny uloženy do Google Tabulky!")
+            except Exception as e:
+                st.error(f"Chyba zápisu: {e}. Ujistěte se, že máte v Secrets správný Service Account klíč!")
 
-            # VÝSLEDKY
+            # B) KOMPLETNÍ VÝPOČET ZISKU
+            # Každý řádek z objednávek musí dostat nákupní cenu
+            vypocet_df = pd.merge(df, final_pro_ulozeni, on='itemCode', how='left')
+            vypocet_df['nakupni_cena'] = vypocet_df['nakupni_cena'].fillna(0)
+            vypocet_df['koeficient'] = vypocet_df['koeficient'].fillna(1)
+            
+            # Náklad na řádek = (množství * nákupka * koeficient)
+            vypocet_df['naklad_radek'] = vypocet_df['itemAmount'] * vypocet_df['nakupni_cena'] * vypocet_df['koeficient']
+            
+            # Sumy
+            celkove_trzby = vypocet_df['itemTotalPriceWithoutVat'].sum()
+            celkove_naklady_zbozi = vypocet_df['naklad_radek'].sum()
+            marze = celkove_trzby - celkove_naklady_zbozi
+            zisk = marze - mkt - doprava_faktura
+
+            # Zobrazení výsledků
             st.divider()
-            res1, res2, res3 = st.columns(3)
+            res1, res2, res3, res4 = st.columns(4)
             res1.metric("Tržby celkem", f"{celkove_trzby:,.0f} Kč")
-            res2.metric("Náklady na zboží", f"{celkove_naklady_zbozi:,.0f} Kč")
-            res3.metric("Čistý zisk", f"{zisk:,.0f} Kč")
+            res2.metric("Náklady zboží", f"{celkove_naklady_zbozi:,.0f} Kč")
+            res3.metric("Hrubá marže", f"{marze:,.0f} Kč")
+            res4.metric("ČISTÝ ZISK", f"{zisk:,.0f} Kč", delta=f"{zisk:,.0f} Kč")
 
-            # BONUSEK: Data pro Google Tabulku
-            st.subheader("📂 Data pro uložení")
-            st.write("Jelikož Google nepovolil automatický zápis, zkopírujte tyto řádky a vložte je do své Google tabulky pro příště:")
-            st.dataframe(final_cenik_z_webu[['itemCode', 'nakupni_cena', 'koeficient']])
+            if zisk > 0:
+                st.balloons()
