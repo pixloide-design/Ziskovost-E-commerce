@@ -6,17 +6,19 @@ import time
 st.set_page_config(
     page_title="Ziskovost E-commerce | Manažerský panel",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
-# --- STYLOVÁNÍ (Kompletní CSS) ---
+# --- KOMPLETNÍ STYLING (CSS) ---
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 1px solid #e0e0e0; }
     div[data-testid="stExpander"] { border: 1px solid #d1d1d1; border-radius: 10px; background-color: white; }
-    .stButton>button { width: 100%; border-radius: 8px; height: 3.5em; font-weight: bold; font-size: 1.2em; background-color: #007bff; color: white; border: none; }
-    .stButton>button:hover { background-color: #0056b3; border: none; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 3.8em; font-weight: bold; font-size: 1.1em; background-color: #007bff; color: white; border: none; transition: 0.3s; }
+    .stButton>button:hover { background-color: #0056b3; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    h1, h2, h3 { color: #1e1e1e; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -31,125 +33,134 @@ if "authenticated" not in st.session_state:
 
 if not st.session_state.authenticated:
     st.title("🔒 Zabezpečený manažerský přístup")
-    heslo = st.text_input("Zadejte firemní heslo:", type="password")
-    if st.button("Vstoupit do aplikace"):
+    heslo = st.text_input("Zadejte firemní heslo pro přístup k zisku:", type="password")
+    if st.button("VSTOUPIT DO SYSTÉMU"):
         if heslo == HESLO_PRO_VSTUP:
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("❌ Neplatné heslo!")
-        return False
-    return True
+            st.error("❌ Neplatné heslo! Přístup odepřen.")
+else:
+    # --- HLAVNÍ APLIKACE ---
+    st.title("💰 Analýza ziskovosti a správa nákladů")
 
-if st.session_state.authenticated:
-    st.title("💰 Analýza ziskovosti e-shopu")
-
-    # --- POŘÁDNÁ NÁPOVĚDA ---
-    with st.expander("📖 PODROBNÝ NÁVOD PRO VEDENÍ (Čtěte pozorně)"):
-        st.markdown("""
-        ### Jak postupovat:
-        1. **Fixní náklady:** Vyplňte náklady na **Marketing** a **Dopravu** (celkové faktury bez DPH).
-        2. **Import dat:** Nahrajte soubor `orders.csv`. Program spáruje produkty s nákupními cenami.
-        3. **Kontrola nákupních cen (NC):** - Program načte existující ceny z Google tabulky. 
-            - Pokud produkt cenu nemá (0.00), dopište ji. 
-            - **Výpočet odečte ceny u VŠECH prodaných kusů v exportu.**
-        4. **Koeficient:** Použijte pro přepočet balení (např. 1 balení = 2.5 m² -> koeficient 2.5).
-        """)
+    # --- POŘÁDNÁ ROZPRACOVANÁ NÁPOVĚDA ---
+    with st.expander("📖 MANUÁL PRO VEDENÍ (Jak interpretovat výsledky)"):
+        col_n1, col_n2 = st.columns(2)
+        with col_n1:
+            st.markdown("""
+            **Základní postup:**
+            1. **Fixní náklady:** Zadejte Marketing (Sklik, FB) a Dopravu (měsíční faktura) bez DPH.
+            2. **Import:** Nahrajte soubor `orders.csv`. Program spáruje produkty s nákupními cenami v Google tabulce.
+            3. **Kontrola NC:** Pokud vidíte u produktu cenu **0.00**, systém jej nezná. Dopište cenu přímo do tabulky na webu.
+            """)
+        with col_n2:
+            st.markdown("""
+            **Logika výpočtu:**
+            - Program nebere jen unikátní produkty, ale projde **každý jeden prodaný kus** v exportu.
+            - **Koeficient:** Pokud prodáváte balení (např. balení dlažby 2.5 m2), nastavte koeficient na 2.5 a cenu zadejte za 1 m2.
+            - **Výsledek:** Zobrazí čistý zisk po odečtení zboží, marketingu a dopravy.
+            """)
 
     # --- NAČTENÍ DAT Z GOOGLE ---
     try:
-        with st.spinner('Synchronizuji data s databází cen...'):
+        with st.spinner('Synchronizuji data s Google Cloud...'):
             pamet_df = pd.read_csv(URL_CSV)
             pamet_df['itemCode'] = pamet_df['itemCode'].astype(str)
             pamet_df = pamet_df.drop_duplicates(subset=['itemCode'], keep='last')
     except:
+        st.error("Nepodařilo se načíst databázi cen z Google Sheets.")
         pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
-    # --- 1. FIXNÍ NÁKLADY ---
+    # --- SEKCE 1: FIXNÍ NÁKLADY ---
     st.subheader("🛠️ 1. Nastavení fixních nákladů období")
-    col_f1, col_f2 = st.columns(2)
-    mkt_cost = col_f1.number_input("Marketing celkem (Kč bez DPH):", min_value=0.0, step=100.0, value=0.0)
-    doprava_cost = col_f2.number_input("Doprava celkem (faktura bez DPH):", min_value=0.0, step=100.0, value=0.0)
+    cf1, cf2 = st.columns(2)
+    mkt_cost = cf1.number_input("Celkový marketing (Kč bez DPH):", min_value=0.0, step=100.0, value=0.0, help="Sklik, Google Ads, Facebook Ads")
+    doprava_cost = cf2.number_input("Faktura od dopravců (Kč bez DPH):", min_value=0.0, step=100.0, value=0.0, help="Celková suma za štítky a přepravu")
 
-    # --- 2. NAHRÁNÍ SOUBORU ---
+    # --- SEKCE 2: NAHRÁNÍ SOUBORU ---
     st.subheader("📂 2. Nahrání exportu objednávek")
-    uploaded_file = st.file_uploader("Vyberte soubor orders.csv", type=['csv'])
+    uploaded_file = st.file_uploader("Nahrajte soubor orders.csv z e-shopu", type=['csv'])
 
     if uploaded_file:
         df_obj = pd.read_csv(uploaded_file, sep=';', decimal=',', encoding='cp1250')
+        
+        # Standardizace dat
         df_obj['itemTotalPriceWithoutVat'] = pd.to_numeric(df_obj['itemTotalPriceWithoutVat'], errors='coerce').fillna(0)
         df_obj['itemAmount'] = pd.to_numeric(df_obj['itemAmount'], errors='coerce').fillna(1)
         df_obj['itemCode'] = df_obj['itemCode'].astype(str)
 
-        # Příprava dat pro editor (Všechny unikátní položky z exportu)
+        # Příprava editoru pro unikátní položky z exportu
         unikaty = df_obj.drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
         editor_prep = pd.merge(unikaty, pamet_df[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
         editor_prep['nakupni_cena'] = editor_prep['nakupni_cena'].fillna(0.0)
         editor_prep['koeficient'] = editor_prep['koeficient'].fillna(1.0)
 
-        st.subheader("📝 3. Kontrola nákupních cen")
-        st.info("Zde jsou všechny produkty z exportu. Program odečte nákupní cenu od každého prodaného kusu.")
+        st.subheader("📝 3. Kontrola a úprava nákupních cen")
+        st.info("Upravte ceny v tabulce. Tyto změny se okamžitě promítnou do celkového výpočtu.")
         
-        # EDITOR S KLÍČEM
-        final_editor_df = st.data_editor(
+        # TABULKA PRO ÚPRAVU S KLÍČEM
+        edited_table = st.data_editor(
             editor_prep,
             column_config={
-                "itemCode": "Kód produktu",
-                "itemName": "Název položky",
+                "itemCode": "Kód",
+                "itemName": "Název produktu",
                 "nakupni_cena": st.column_config.NumberColumn("NC / Jednotku (Kč)", format="%.2f"),
                 "koeficient": st.column_config.NumberColumn("Koeficient", format="%.2f")
             },
             hide_index=True,
             use_container_width=True,
-            key="master_editor"
+            key="cenovy_editor_final"
         )
 
-        # --- VÝPOČET ---
-        if st.button("🚀 PROVÉST KOMPLETNÍ VÝPOČET", type="primary"):
-            with st.status("Analyzuji data a počítám nákupní náklady...", expanded=True) as status:
+        # --- TLAČÍTKO VÝPOČTU ---
+        if st.button("🚀 PROVÉST KOMPLETNÍ ANALÝZU ZISKU", type="primary"):
+            with st.status("Provádím hloubkový výpočet...", expanded=True) as status:
                 
-                # A) ZÍSKÁNÍ MASTER CENÍKU (Všechny položky: ty z Google i ty změněné)
-                master_ceny = editor_prep.copy()
-                state = st.session_state["master_editor"]
+                # A) EXTRAKCE DAT Z EDITORU (Ošetření změn)
+                # Musíme vzít základ a ručně do něj vložit to, co uživatel změnil
+                aktualni_ceny = editor_prep.copy()
+                state = st.session_state["cenovy_editor_final"]
                 
-                # Přepsání hodnot těmi z editoru (včetně těch, co už v tabulce byly)
                 if "edited_rows" in state:
-                    for row_idx_str, changes in state["edited_rows"].items():
-                        row_idx = int(row_idx_str)
-                        for col_name, new_val in changes.items():
-                            master_ceny.loc[row_idx, col_name] = new_val
+                    for idx_str, changes in state["edited_rows"].items():
+                        idx = int(idx_str)
+                        for col, val in changes.items():
+                            aktualni_ceny.at[idx, col] = val
 
-                # B) PÁROVÁNÍ 1:1 NA CELÝ EXPORT
-                # Vymažeme staré sloupce NC z exportu, aby se netloukly
+                # Pojistka pro čísla
+                aktualni_ceny['nakupni_cena'] = pd.to_numeric(aktualni_ceny['nakupni_cena']).fillna(0)
+                aktualni_ceny['koeficient'] = pd.to_numeric(aktualni_ceny['koeficient']).fillna(1)
+                
+                # B) PŘÍPRAVA EXPORTU (Vyčištění od nulových NC, pokud tam už jsou)
+                # Tohle je klíčové - zbavíme se starých NC sloupců z CSV
                 df_calc = df_obj.drop(columns=[c for c in ['nakupni_cena', 'koeficient'] if c in df_obj.columns], errors='ignore')
                 
-                # Spojení exportu s MASTER ceníkem
-                final_merged = pd.merge(df_calc, master_ceny[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
+                # C) PÁROVÁNÍ 1:1 (Každý prodaný kus v exportu dostane svou NC)
+                final_merged = pd.merge(df_calc, aktualni_ceny[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
                 
-                # C) VÝPOČET NÁKLADŮ
-                final_merged['nakupni_cena'] = pd.to_numeric(final_merged['nakupni_cena']).fillna(0)
-                final_merged['koeficient'] = pd.to_numeric(final_merged['koeficient']).fillna(1)
-                
-                # Náklad = Množství * NC * Koeficient (pro každý řádek!)
-                final_merged['line_cost'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
+                # D) VÝPOČET NÁKLADŮ NA ŘÁDEK
+                final_merged['naklad_polozka'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
 
-                # Sumy
+                # Celkové sumy
                 t_trzby = final_merged['itemTotalPriceWithoutVat'].sum()
-                t_naklady_zbozi = final_merged['line_cost'].sum()
+                t_naklady_zbozi = final_merged['naklad_polozka'].sum()
                 t_hruba_marze = t_trzby - t_naklady_zbozi
                 t_zisk = t_hruba_marze - mkt_cost - doprava_cost
 
                 time.sleep(1)
-                status.update(label="Výpočet dokončen!", state="complete", expanded=False)
+                status.update(label="Analýza dokončena!", state="complete", expanded=False)
 
-            # --- VÝSLEDKY ---
+            # --- FINÁLNÍ VÝSLEDKY ---
             st.divider()
-            st.header("📊 Finanční výsledky období")
+            st.header("📊 Finanční výsledky")
             
             res1, res2, res3, res4 = st.columns(4)
             res1.metric("CELKOVÉ TRŽBY", f"{t_trzby:,.0f} Kč".replace(',', ' '))
-            # TADY UŽ TO MUSÍ UKAZOVAT REÁLNÉ ČÍSLO
-            res2.metric("NÁKLADY NA ZBOŽÍ", f"{t_naklady_zbozi:,.0f} Kč".replace(',', ' '), delta=f"-{t_naklady_zbozi:,.0f}", delta_color="inverse")
+            
+            # TADY UŽ TO MUSÍ UKAZOVAT REÁLNÉ ČÍSLO (ODEČTENÉ NC)
+            res2.metric("NÁKLADY ZBOŽÍ", f"{t_naklady_zbozi:,.0f} Kč".replace(',', ' '), delta=f"-{t_naklady_zbozi:,.0f}", delta_color="inverse")
+            
             res3.metric("HRUBÁ MARŽE", f"{t_hruba_marze:,.0f} Kč".replace(',', ' '))
             
             p_color = "normal" if t_zisk > 0 else "inverse"
@@ -157,19 +168,26 @@ if st.session_state.authenticated:
 
             if t_zisk > 0:
                 st.balloons()
+                st.success(f"Výborně! Období končí v zisku {t_zisk:,.0f} Kč.")
             else:
-                st.error("Období končí ve ztrátě.")
+                st.error(f"Pozor! Období končí ve ztrátě {t_zisk:,.0f} Kč.")
 
-            # Detailní rozpis pro kontrolu
-            with st.expander("🔍 Detailní kontrola (Každý prodaný kus a jeho nákupní cena)"):
-                st.dataframe(final_merged[['itemCode', 'itemName', 'itemAmount', 'nakupni_cena', 'line_cost']], use_container_width=True)
+            # --- DETAILNÍ ROZPIS ---
+            with st.expander("🔍 DETAILNÍ ROZPIS NÁKLADŮ (Kontrola výpočtu)"):
+                st.write("V této tabulce vidíte, jakou nákupní cenu program přiřadil ke každému řádku objednávky.")
+                st.dataframe(
+                    final_merged[['itemCode', 'itemName', 'itemAmount', 'nakupni_cena', 'naklad_polozka']]
+                    .rename(columns={'naklad_polozka': 'Náklad Celkem'}),
+                    use_container_width=True
+                )
 
-            # Pokus o uložení
+            # --- ZÁPIS DO GOOGLE SHEET ---
             try:
                 from streamlit_gsheets import GSheetsConnection
                 conn = st.connection("gsheets", type=GSheetsConnection)
-                update_db = pd.concat([pamet_df, master_ceny[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
-                conn.update(spreadsheet=URL_CSV, data=update_db)
-                st.toast("Ceny uloženy na Google Disk!", icon="✅")
+                # Spojíme původní paměť s aktuálními daty z obrazovky
+                update_final = pd.concat([pamet_df, aktualni_ceny[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
+                conn.update(spreadsheet=URL_CSV, data=update_final)
+                st.toast("Databáze cen byla úspěšně aktualizována na Google Disku.", icon="💾")
             except:
-                st.info("💡 Tip: Pro automatické ukládání cen nastavte 'Service Account' v Secrets.")
+                st.info("💡 Tip: Pro automatické ukládání cen je potřeba nastavit Service Account v Secrets.")
