@@ -67,7 +67,7 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         st.error(f"⚠️ Chyba při stahování XML feedu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: EXPORT OBJEDNÁVEK (Opravené extrahování data) ---
+# --- CACHE: EXPORT OBJEDNÁVEK ---
 @st.cache_data(ttl=600) # Aktualizuje se každých 10 minut
 def load_orders(url):
     try:
@@ -75,8 +75,7 @@ def load_orders(url):
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(clean_url, headers=headers, timeout=30)
         response.raise_for_status()
-        # Shoptet exportuje v CP1250
-        response.encoding = 'cp1250' 
+        response.encoding = 'cp1250' # Správné kódování pro Shoptet
         
         df = pd.read_csv(StringIO(response.text), sep=';', decimal=',')
         
@@ -85,24 +84,28 @@ def load_orders(url):
         df['itemAmount'] = pd.to_numeric(df['itemAmount'], errors='coerce').fillna(1)
         df['itemCode'] = df['itemCode'].astype(str).str.strip()
         
-        # --- NEPRŮSTŘELNÁ EXTRACE DATUMU ---
+        # --- NEPRŮSTŘELNÁ OPRAVA DATUMU ---
         if 'date' in df.columns:
-            # Převedeme vše na string a odstraníme zbytečné mezery
+            # Převedeme na string
             df['date_str'] = df['date'].astype(str).str.strip()
             
-            # Vytvoříme pomocnou funkci pro bezpečné parsování roku a měsíce
-            def get_month_year(date_string):
-                try:
-                    # Hledáme vzor jako "DD.MM.YYYY" (nebo cokoliv s tečkami)
-                    parts = date_string.split(' ')[0].split('.')
-                    if len(parts) >= 3:
-                        return float(parts[1]), float(parts[2])
-                except:
-                    pass
-                return None, None
-
-            # Aplikujeme funkci na každý řádek
-            df[['mesic', 'rok']] = df['date_str'].apply(lambda x: pd.Series(get_month_year(x)))
+            # Záchranné funkce přes regulární výrazy (zvládnou RRRR-MM-DD i DD.MM.RRRR)
+            def extract_month(d):
+                m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
+                if m_iso: return float(m_iso.group(2))
+                m_cz = re.search(r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', str(d))
+                if m_cz: return float(m_cz.group(2))
+                return None
+                
+            def extract_year(d):
+                m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
+                if m_iso: return float(m_iso.group(1))
+                m_cz = re.search(r'(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})', str(d))
+                if m_cz: return float(m_cz.group(3))
+                return None
+                
+            df['rok'] = df['date_str'].apply(extract_year)
+            df['mesic'] = df['date_str'].apply(extract_month)
         
         return df
     except Exception as e:
@@ -159,7 +162,6 @@ else:
     
     # Filtrovací roletky pro datum
     if not df_vsechny_objednavky.empty and 'rok' in df_vsechny_objednavky.columns:
-        # Převedeme na int, ignorujeme NaN
         roky = sorted(df_vsechny_objednavky['rok'].dropna().unique().astype(int).tolist(), reverse=True)
         mesice = sorted(df_vsechny_objednavky['mesic'].dropna().unique().astype(int).tolist())
         
@@ -169,7 +171,6 @@ else:
         
         vybrany_rok = col_r.selectbox("Rok:", roky)
         
-        # Pokusíme se předvybrat aktuální měsíc, pokud je v seznamu, jinak první dostupný
         current_month = pd.Timestamp.now().month
         default_month_idx = mesice.index(current_month) if current_month in mesice else 0
         vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=default_month_idx)
@@ -177,14 +178,26 @@ else:
         mkt_cost = col_mkt.number_input("Marketing (bez DPH):", min_value=0.0, step=100.0)
         doprava_cost = col_dop.number_input("Doprava faktury (bez DPH):", min_value=0.0, step=100.0)
         
-        # Vyfiltrování objednávek na vybrané období
+        # --- FILTR STAVU (NOVINKA PRO PŘESNOST) ---
+        stavy = []
+        if 'statusName' in df_vsechny_objednavky.columns:
+            stavy = sorted(df_vsechny_objednavky['statusName'].dropna().unique().tolist())
+            # Automaticky odebereme storna a zrušené
+            default_stavy = [s for s in stavy if "storno" not in str(s).lower() and "zrušen" not in str(s).lower()]
+            vybrane_stavy = st.multiselect("Filtrovat stavy objednávek (vyřaďte storna atd.):", stavy, default=default_stavy)
+        
+        # Aplikace filtrů
         df_filtr = df_vsechny_objednavky[(df_vsechny_objednavky['rok'] == float(vybrany_rok)) & (df_vsechny_objednavky['mesic'] == float(vybrany_mesic))]
+        
+        if 'statusName' in df_vsechny_objednavky.columns and vybrane_stavy:
+            df_filtr = df_filtr[df_filtr['statusName'].isin(vybrane_stavy)]
+
     else:
         st.error("Nepodařilo se načíst data o datumech z e-shopu.")
         st.stop()
 
     if df_filtr.empty:
-        st.warning(f"V období {vybrany_mesic}/{vybrany_rok} nejsou evidovány žádné objednávky.")
+        st.warning(f"V období {vybrany_mesic}/{vybrany_rok} nejsou evidovány žádné platné objednávky.")
     else:
         # --- 3. PŘÍPRAVA DAT PRO VYBRANÝ MĚSÍC ---
         unikaty = df_filtr[df_filtr['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
@@ -222,7 +235,6 @@ else:
         if st.button("🚀 SPOČÍTAT ZISK ZA VYBRANÝ MĚSÍC A ULOŽIT", type="primary"):
             with st.status(f"Zpracovávám data pro {vybrany_mesic}/{vybrany_rok}...", expanded=True) as status:
                 
-                # Získání dat z editoru
                 aktualni_nc = tabulka_pro_editor.copy()
                 state = st.session_state["cenovy_editor"]
                 if "edited_rows" in state:
@@ -230,7 +242,6 @@ else:
                         for col, val in changes.items():
                             aktualni_nc.at[int(idx), col] = val
 
-                # Spárování a matematika
                 df_vypocet = df_filtr.copy()
                 if 'nakupni_cena' in df_vypocet.columns:
                     df_vypocet = df_vypocet.rename(columns={'nakupni_cena': 'nc_stara_z_csv'})
