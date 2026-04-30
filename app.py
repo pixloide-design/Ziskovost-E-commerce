@@ -27,7 +27,7 @@ URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tq
 XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
 ORDERS_CSV_URL = "https://eshop.superpodlaha.cz/export/orders.csv?patternId=-9&partnerId=6&hash=39a4ee9904e1b2fecd432faddac364a49291288ba4f616285a5d1c6ee147d716"
 
-# --- POMOCNÉ FUNKCE (Ultra agresivní čištění) ---
+# --- POMOCNÉ FUNKCE ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
     if m_iso: return float(m_iso.group(2))
@@ -86,10 +86,11 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         st.error(f"⚠️ Chyba při stahování XML feedu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: EXPORT OBJEDNÁVEK (API) ---
-@st.cache_data(ttl=60)
+# --- CACHE: EXPORT OBJEDNÁVEK Z ODKAZU ---
+@st.cache_data(ttl=3600) # Vráceno na hodinu, ať to nestahuje pořád.
 def load_orders(url):
     try:
+        # Cache Buster stále funguje, když vyprší TTL nebo klikneš na Vynutit aktualizaci
         clean_url = f"{str(url).strip()}&timestamp={int(time.time())}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(clean_url, headers=headers, timeout=45)
@@ -110,6 +111,21 @@ def load_orders(url):
     except Exception as e:
         st.error(f"⚠️ Chyba při stahování objednávek: {e}")
         return pd.DataFrame()
+
+# --- CACHE: ZPRACOVÁNÍ RUČNÍHO SOUBORU ---
+@st.cache_data
+def process_uploaded_file(file_bytes):
+    # Zabrání tomu, aby se soubor četl při každém kliknutí znova
+    df = pd.read_csv(StringIO(file_bytes.decode('cp1250')), sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False)
+    df['itemTotalPriceWithoutVat'] = clean_money(df['itemTotalPriceWithoutVat'])
+    df['itemAmount'] = clean_money(df['itemAmount'])
+    df['itemCode'] = df['itemCode'].astype(str).str.strip()
+    
+    if 'date' in df.columns:
+        df['date_str'] = df['date'].astype(str).str.strip().str.replace('"', '')
+        df['rok'] = df['date_str'].apply(extract_year)
+        df['mesic'] = df['date_str'].apply(extract_month)
+    return df
 
 # --- ZABEZPEČENÍ APLIKACE ---
 if "authenticated" not in st.session_state:
@@ -146,7 +162,7 @@ else:
         st.rerun()
 
     # --- 1. NAČTENÍ DAT ---
-    with st.spinner("Stahuji a zpracovávám data přes API e-shopu..."):
+    with st.spinner("Stahuji a zpracovávám data..."):
         df_xml = load_xml_feed(XML_FEED_URL, dph_sazba=dph_sazba_xml, ceny_s_dph=xml_ceny_s_dph)
         try:
             pamet_df = pd.read_csv(URL_CSV_GSHEETS)
@@ -155,7 +171,12 @@ else:
         except:
             pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
-    df_vsechny_objednavky = load_orders(ORDERS_CSV_URL)
+    uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (volitelné)", type=['csv'])
+
+    if uploaded_file:
+        df_vsechny_objednavky = process_uploaded_file(uploaded_file.getvalue())
+    else:
+        df_vsechny_objednavky = load_orders(ORDERS_CSV_URL)
 
     # --- 2. VÝBĚR OBDOBÍ A NÁKLADŮ ---
     st.subheader("📅 1. Výběr období a fixních nákladů")
