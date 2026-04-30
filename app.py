@@ -4,6 +4,7 @@ import requests
 import xml.etree.ElementTree as ET
 import time
 from io import StringIO
+import re
 
 # --- KONFIGURACE STRÁNKY ---
 st.set_page_config(page_title="Ziskovost E-shopu | PRO", page_icon="📈", layout="wide")
@@ -66,7 +67,7 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         st.error(f"⚠️ Chyba při stahování XML feedu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: EXPORT OBJEDNÁVEK ---
+# --- CACHE: EXPORT OBJEDNÁVEK (Opravené extrahování data) ---
 @st.cache_data(ttl=600) # Aktualizuje se každých 10 minut
 def load_orders(url):
     try:
@@ -74,7 +75,8 @@ def load_orders(url):
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(clean_url, headers=headers, timeout=30)
         response.raise_for_status()
-        response.encoding = 'cp1250' # Správné kódování pro Shoptet
+        # Shoptet exportuje v CP1250
+        response.encoding = 'cp1250' 
         
         df = pd.read_csv(StringIO(response.text), sep=';', decimal=',')
         
@@ -83,14 +85,24 @@ def load_orders(url):
         df['itemAmount'] = pd.to_numeric(df['itemAmount'], errors='coerce').fillna(1)
         df['itemCode'] = df['itemCode'].astype(str).str.strip()
         
-        # --- OPRAVA DATUMU ---
-        # Shoptet dává formát 'DD.MM.YYYY HH:MM:SS', např. '01.04.2026 14:30:00'
+        # --- NEPRŮSTŘELNÁ EXTRACE DATUMU ---
         if 'date' in df.columns:
-            # Převedeme na string a ořízneme jen na datumovou část (před mezerou)
-            df['date_str'] = df['date'].astype(str).str.split(' ').str[0]
-            # Extrakt roku a měsíce přímo z textu (předpokládáme DD.MM.YYYY)
-            df['rok'] = df['date_str'].str.split('.').str[2].astype(float)
-            df['mesic'] = df['date_str'].str.split('.').str[1].astype(float)
+            # Převedeme vše na string a odstraníme zbytečné mezery
+            df['date_str'] = df['date'].astype(str).str.strip()
+            
+            # Vytvoříme pomocnou funkci pro bezpečné parsování roku a měsíce
+            def get_month_year(date_string):
+                try:
+                    # Hledáme vzor jako "DD.MM.YYYY" (nebo cokoliv s tečkami)
+                    parts = date_string.split(' ')[0].split('.')
+                    if len(parts) >= 3:
+                        return float(parts[1]), float(parts[2])
+                except:
+                    pass
+                return None, None
+
+            # Aplikujeme funkci na každý řádek
+            df[['mesic', 'rok']] = df['date_str'].apply(lambda x: pd.Series(get_month_year(x)))
         
         return df
     except Exception as e:
@@ -147,21 +159,26 @@ else:
     
     # Filtrovací roletky pro datum
     if not df_vsechny_objednavky.empty and 'rok' in df_vsechny_objednavky.columns:
-        # Odstraníme NaN (neplatné datumy) pro zobrazení v roletce
+        # Převedeme na int, ignorujeme NaN
         roky = sorted(df_vsechny_objednavky['rok'].dropna().unique().astype(int).tolist(), reverse=True)
-        mesice = list(range(1, 13))
+        mesice = sorted(df_vsechny_objednavky['mesic'].dropna().unique().astype(int).tolist())
         
         col_r, col_m, col_mkt, col_dop = st.columns(4)
-        # Pokud by náhodou pole let bylo prázdné, dáme tam aktuální rok jako pojistku
         if not roky: roky = [pd.Timestamp.now().year]
+        if not mesice: mesice = list(range(1, 13))
         
         vybrany_rok = col_r.selectbox("Rok:", roky)
-        vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=(pd.Timestamp.now().month - 1) if pd.Timestamp.now().year == vybrany_rok else 0)
+        
+        # Pokusíme se předvybrat aktuální měsíc, pokud je v seznamu, jinak první dostupný
+        current_month = pd.Timestamp.now().month
+        default_month_idx = mesice.index(current_month) if current_month in mesice else 0
+        vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=default_month_idx)
+        
         mkt_cost = col_mkt.number_input("Marketing (bez DPH):", min_value=0.0, step=100.0)
         doprava_cost = col_dop.number_input("Doprava faktury (bez DPH):", min_value=0.0, step=100.0)
         
         # Vyfiltrování objednávek na vybrané období
-        df_filtr = df_vsechny_objednavky[(df_vsechny_objednavky['rok'] == vybrany_rok) & (df_vsechny_objednavky['mesic'] == vybrany_mesic)]
+        df_filtr = df_vsechny_objednavky[(df_vsechny_objednavky['rok'] == float(vybrany_rok)) & (df_vsechny_objednavky['mesic'] == float(vybrany_mesic))]
     else:
         st.error("Nepodařilo se načíst data o datumech z e-shopu.")
         st.stop()
