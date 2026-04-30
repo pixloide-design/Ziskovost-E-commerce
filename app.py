@@ -21,12 +21,15 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- KONFIGURACE DAT A URL ---
-HESLO_PRO_VSTUP = "KoberceAdamSuperpodlaha2026MiraSedaXX22XX25" 
-SHEET_ID = "1KQXP_5hkEBOXUDLMZR1CdSsdMf8BU72kPxEFaXdNjSY"
-URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
-XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
-ORDERS_CSV_URL = "https://eshop.superpodlaha.cz/export/orders.csv?patternId=-9&partnerId=6&hash=39a4ee9904e1b2fecd432faddac364a49291288ba4f616285a5d1c6ee147d716"
-
+try:
+    HESLO_PRO_VSTUP = st.secrets["eshop"]["HESLO_PRO_VSTUP"]
+    SHEET_ID = st.secrets["eshop"]["SHEET_ID"]
+    URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+    XML_FEED_URL = st.secrets["eshop"]["XML_FEED_URL"]
+    ORDERS_CSV_URL = st.secrets["eshop"]["ORDERS_CSV_URL"]
+except KeyError as e:
+    st.error(f"❌ Chybí bezpečnostní nastavení (Secrets) ve Streamlitu pro klíč: {e}")
+    st.stop()
 # --- POMOCNÉ FUNKCE ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
