@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -22,23 +21,31 @@ st.markdown("""
 # --- KONFIGURACE DAT ---
 HESLO_PRO_VSTUP = "mojeheslo123" 
 SHEET_ID = "1KQXP_5hkEBOXUDLMZR1CdSsdMf8BU72kPxEFaXdNjSY"
-URL_CSV_GSHEETS = f"[https://docs.google.com/spreadsheets/d/](https://docs.google.com/spreadsheets/d/){SHEET_ID}/gviz/tq?tqx=out:csv"
-XML_FEED_URL = "[https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa](https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa)"
+URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
 
 # --- CACHE PRO XML FEED (aby se nestahoval při každém kliknutí) ---
 @st.cache_data(ttl=3600) # Pamatuje si data 1 hodinu
 def load_xml_feed(url):
     try:
-        response = requests.get(url, timeout=15)
+        # Odstranění neviditelných znaků a mezer, které způsobují chybu připojení
+        clean_url = str(url).strip()
+        
+        # Maskování, aby nás e-shop neblokoval
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
+        
+        response = requests.get(clean_url, headers=headers, timeout=20)
         response.raise_for_status()
         root = ET.fromstring(response.content)
         
         xml_data = []
-        # Procházení XML - předpokládáme standardní Shoptet/Heureka tagy
+        # Procházení XML - tagy SHOPITEM
         for item in root.findall('.//SHOPITEM'):
             code = item.findtext('CODE')
             if not code:
-                code = item.findtext('ITEM_ID') # Záchrana, kdyby to byl jiný feed
+                code = item.findtext('ITEM_ID') # Záchrana, kdyby se tag jmenoval jinak
                 
             purchase_price = item.findtext('PURCHASE_PRICE')
             
@@ -78,7 +85,7 @@ else:
         1. **Automatické NC:** Systém sám stáhne váš XML feed a najde nákupní ceny.
         2. **Google Tabulka:** Pokud jste uložili jinou cenu do Google Tabulky, má přednost před XML.
         3. **Doplnění:** V tabulce dole se vám ukáží produkty z vašich objednávek. **Ty s NC 0.00 dopište.**
-        4. **Výpočet:** Program odečte nákupní cenu u každého prodaného kusu a odečte fixní náklady.
+        4. **Výpočet:** Program vezme Prodejní cenu a odečte nákupní cenu u každého prodaného kusu. Nakonec odečte fixní náklady.
         """)
 
     # 1. Načtení dat z Google a XML
@@ -125,7 +132,7 @@ else:
         tabulka_pro_editor.rename(columns={'finalni_nc': 'nakupni_cena'}, inplace=True)
 
         st.subheader("📝 3. Kontrola nákupních cen")
-        st.info("💡 Produkty jsou seřazeny tak, že ty s NULOVOU nákupní cenou jsou úplně nahoře! Doplňte je.")
+        st.info("💡 Produkty jsou seřazeny tak, že ty s NULOVOU nákupní cenou (nenalezeny ve feedu) jsou nahoře. Doplňte je.")
         
         # Seřazení tak, aby nuly byly nahoře k doplnění
         tabulka_pro_editor = tabulka_pro_editor.sort_values(by=['nakupni_cena', 'itemName'], ascending=[True, True]).reset_index(drop=True)
@@ -147,7 +154,7 @@ else:
         if st.button("🚀 SPOČÍTAT FINÁLNÍ ZISK A ULOŽIT", type="primary"):
             with st.status("Provádím datovou analýzu...", expanded=True) as status:
                 
-                # 1. Načtení dat z editoru (včetně změn)
+                # 1. Načtení dat z editoru (včetně změn z obrazovky)
                 aktualni_nc = tabulka_pro_editor.copy()
                 state = st.session_state["cenovy_editor"]
                 if "edited_rows" in state:
@@ -160,14 +167,14 @@ else:
                 if 'nakupni_cena' in df_vypocet.columns:
                     df_vypocet = df_vypocet.rename(columns={'nakupni_cena': 'nc_stara_z_csv'})
 
-                # 3. PÁROVÁNÍ 1:1 NA EXPORT
+                # 3. PÁROVÁNÍ 1:1 NA EXPORT (Přiřazení NC ke každému prodanému kusu)
                 final_merged = pd.merge(df_vypocet, aktualni_nc[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
                 
                 # 4. MATEMATIKA NÁKLADŮ
                 final_merged['nakupni_cena'] = pd.to_numeric(final_merged['nakupni_cena']).fillna(0)
                 final_merged['koeficient'] = pd.to_numeric(final_merged['koeficient']).fillna(1)
                 
-                # Výpočet nákladu za každý řádek (Množství * NC * Koeficient)
+                # Nákupní náklad za každý řádek (Množství * NC * Koeficient)
                 final_merged['naklad_radek'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
 
                 # 5. CELKOVÉ SOUČTY
@@ -204,8 +211,9 @@ else:
             try:
                 from streamlit_gsheets import GSheetsConnection
                 conn = st.connection("gsheets", type=GSheetsConnection)
-                # Spojíme nově zadaná data s pamětí
-                update_db = pd.concat([pamet_df, aktualni_nc[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
+                # Uložíme jen ty záznamy, kde NC > 0, abychom zbytečně neukládali nuly
+                k_ulozeni = aktualni_nc[aktualni_nc['nakupni_cena'] > 0]
+                update_db = pd.concat([pamet_df, k_ulozeni[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
                 st.toast("Ceny uloženy do Google Tabulky!", icon="💾")
             except Exception as e:
