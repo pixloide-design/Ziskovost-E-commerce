@@ -27,7 +27,7 @@ URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tq
 XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
 ORDERS_CSV_URL = "https://eshop.superpodlaha.cz/export/orders.csv?patternId=-9&partnerId=6&hash=39a4ee9904e1b2fecd432faddac364a49291288ba4f616285a5d1c6ee147d716"
 
-# --- POMOCNÉ FUNKCE PRO DATUM (Zcela neprůstřelné pro Shoptet) ---
+# --- POMOCNÉ FUNKCE PRO DATUM ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
     if m_iso: return float(m_iso.group(2))
@@ -83,23 +83,32 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
 # --- CACHE: EXPORT OBJEDNÁVEK Z ODKAZU ---
-@st.cache_data(ttl=600) # Aktualizuje se každých 10 minut
+@st.cache_data(ttl=60) # BRUTÁLNĚ SNÍŽENO NA 1 MINUTU!
 def load_orders(url):
     try:
         clean_url = str(url).strip()
         headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(clean_url, headers=headers, timeout=30)
+        response = requests.get(clean_url, headers=headers, timeout=45)
         response.raise_for_status()
         response.encoding = 'cp1250' # Shoptet kódování
         
-        df = pd.read_csv(StringIO(response.text), sep=';', decimal=',')
+        # Robustní načtení: Ignoruje vadné řádky, chápe Shoptet formát s uvozovkami
+        df = pd.read_csv(
+            StringIO(response.text), 
+            sep=';', 
+            decimal=',', 
+            quotechar='"', 
+            on_bad_lines='skip',
+            low_memory=False
+        )
+        
         df['itemTotalPriceWithoutVat'] = pd.to_numeric(df['itemTotalPriceWithoutVat'], errors='coerce').fillna(0)
         df['itemAmount'] = pd.to_numeric(df['itemAmount'], errors='coerce').fillna(1)
         df['itemCode'] = df['itemCode'].astype(str).str.strip()
         
         # Extrakce roku a měsíce pro filtrování
         if 'date' in df.columns:
-            df['date_str'] = df['date'].astype(str).str.strip()
+            df['date_str'] = df['date'].astype(str).str.strip().str.replace('"', '')
             df['rok'] = df['date_str'].apply(extract_year)
             df['mesic'] = df['date_str'].apply(extract_month)
         return df
@@ -137,7 +146,8 @@ else:
     xml_ceny_s_dph = st.sidebar.checkbox("Ceny z administrace e-shopu jsou vč. DPH", value=True)
     dph_sazba_xml = st.sidebar.number_input("Sazba DPH (%):", value=21.0, step=1.0)
     
-    if st.sidebar.button("🔄 Vynutit aktualizaci dat"):
+    # TOTO TLAČÍTKO JE TEĎ TVŮJ NEJLEPŠÍ KAMARÁD
+    if st.sidebar.button("🔄 VYNUTIT AKTUALIZACI DAT"):
         st.cache_data.clear()
         st.rerun()
 
@@ -156,7 +166,6 @@ else:
     st.subheader("📅 1. Výběr období a fixních nákladů")
     
     if not df_vsechny_objednavky.empty and 'rok' in df_vsechny_objednavky.columns:
-        # Dynamicky naplníme roletky podle toho, co se reálně stáhlo z e-shopu
         roky = sorted(df_vsechny_objednavky['rok'].dropna().unique().astype(int).tolist(), reverse=True)
         mesice = sorted(df_vsechny_objednavky['mesic'].dropna().unique().astype(int).tolist())
         
@@ -166,7 +175,6 @@ else:
         
         vybrany_rok = col_r.selectbox("Rok:", roky)
         
-        # Pokus o předvýběr aktuálního měsíce
         current_month = pd.Timestamp.now().month
         default_month_idx = mesice.index(current_month) if current_month in mesice else 0
         vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=default_month_idx)
@@ -178,7 +186,6 @@ else:
         stavy = []
         if 'statusName' in df_vsechny_objednavky.columns:
             stavy = sorted(df_vsechny_objednavky['statusName'].dropna().unique().tolist())
-            # Defaultně vyhodíme vše, co zní jako storno nebo zrušeno
             default_stavy = [s for s in stavy if "storno" not in str(s).lower() and "zrušen" not in str(s).lower()]
             vybrane_stavy = st.multiselect("Filtrovat stavy objednávek (vyřaďte storna atd.):", stavy, default=default_stavy)
         
