@@ -24,14 +24,11 @@ SHEET_ID = "1KQXP_5hkEBOXUDLMZR1CdSsdMf8BU72kPxEFaXdNjSY"
 URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
 XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
 
-# --- CACHE PRO XML FEED (aby se nestahoval při každém kliknutí) ---
-@st.cache_data(ttl=3600) # Pamatuje si data 1 hodinu
+# --- CACHE PRO XML FEED (Nová vylepšená verze i pro VARIANTY) ---
+@st.cache_data(ttl=3600)
 def load_xml_feed(url):
     try:
-        # Odstranění neviditelných znaků a mezer, které způsobují chybu připojení
         clean_url = str(url).strip()
-        
-        # Maskování, aby nás e-shop neblokoval
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
@@ -41,22 +38,39 @@ def load_xml_feed(url):
         root = ET.fromstring(response.content)
         
         xml_data = []
-        # Procházení XML - tagy SHOPITEM
+        
+        # Procházení XML
         for item in root.findall('.//SHOPITEM'):
-            code = item.findtext('CODE')
-            if not code:
-                code = item.findtext('ITEM_ID') # Záchrana, kdyby se tag jmenoval jinak
+            # 1. Načtení hlavního produktu
+            main_code = item.findtext('CODE')
+            if not main_code:
+                main_code = item.findtext('ITEM_ID')
                 
-            purchase_price = item.findtext('PURCHASE_PRICE')
+            main_price = item.findtext('PURCHASE_PRICE')
             
-            if code and purchase_price:
+            # Uložení hlavního produktu
+            if main_code and main_price:
                 try:
-                    xml_data.append({'itemCode': str(code).strip(), 'nc_xml': float(purchase_price)})
+                    xml_data.append({'itemCode': str(main_code).strip(), 'nc_xml': float(main_price)})
                 except:
                     pass
+                    
+            # 2. Načtení vnořených VARIANT (Tohle vyřeší problém s m2)
+            for variant in item.findall('.//VARIANT'):
+                var_code = variant.findtext('CODE')
+                var_price = variant.findtext('PURCHASE_PRICE')
+                
+                # Pokud varianta nemá v XML vlastní NC, použije se NC hlavního produktu
+                if not var_price:
+                    var_price = main_price
+                    
+                if var_code and var_price:
+                    try:
+                        xml_data.append({'itemCode': str(var_code).strip(), 'nc_xml': float(var_price)})
+                    except:
+                        pass
         
         df_xml = pd.DataFrame(xml_data)
-        # Odstranění případných duplicit v XML
         if not df_xml.empty:
             df_xml = df_xml.drop_duplicates(subset=['itemCode'], keep='last')
         return df_xml
@@ -82,14 +96,14 @@ else:
 
     with st.expander("📖 JAK SYSTÉM FUNGUJE (Rozklikni)"):
         st.markdown("""
-        1. **Automatické NC:** Systém sám stáhne váš XML feed a najde nákupní ceny.
-        2. **Google Tabulka:** Pokud jste uložili jinou cenu do Google Tabulky, má přednost před XML.
-        3. **Doplnění:** V tabulce dole se vám ukáží produkty z vašich objednávek. **Ty s NC 0.00 dopište.**
-        4. **Výpočet:** Program vezme Prodejní cenu a odečte nákupní cenu u každého prodaného kusu. Nakonec odečte fixní náklady.
+        1. **Automatické NC:** Systém sám stáhne váš XML feed a najde nákupní ceny (včetně variant jako m2).
+        2. **Google Tabulka:** Pokud jste uložili jinou cenu do Tabulky, má přednost před XML.
+        3. **Doplnění:** V tabulce dole doplňte produkty, co mají NC 0.00 (ty co nebyly ve feedu).
+        4. **Výpočet:** Program vezme Prodejní tržbu a odečte nákupní náklad (NC x Množství x Koef).
         """)
 
     # 1. Načtení dat z Google a XML
-    with st.spinner("Stahuji data z XML feedu a Google Tabulky..."):
+    with st.spinner("Stahuji a analyzuji data z e-shopu a Google Tabulky..."):
         df_xml = load_xml_feed(XML_FEED_URL)
         try:
             pamet_df = pd.read_csv(URL_CSV_GSHEETS)
@@ -116,25 +130,25 @@ else:
         df_obj['itemAmount'] = pd.to_numeric(df_obj['itemAmount'], errors='coerce').fillna(1)
         df_obj['itemCode'] = df_obj['itemCode'].astype(str).str.strip()
 
-        # Vytáhneme unikátní produkty (bez dopravy/plateb, ty nemají kód)
+        # Vytáhneme unikátní produkty (bez dopravy/plateb)
         unikaty = df_obj[df_obj['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
         
-        # MAGIE SPOJOVÁNÍ DAT: Objednávky + XML + Google Tabulka
+        # PROPOJENÍ: Objednávky + XML (Včetně variant) + Google Tabulka
         editor_prep = pd.merge(unikaty, df_xml, on='itemCode', how='left')
         editor_prep = pd.merge(editor_prep, pamet_df[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
         
-        # Logika priority cen: 1. Google Tabulka, 2. XML Feed, 3. Nula
+        # Priorita cen: 1. Ručně zadaná, 2. XML Feed (hlavní i varianta), 3. Nula
         editor_prep['finalni_nc'] = editor_prep['nakupni_cena'].fillna(editor_prep['nc_xml']).fillna(0.0)
         editor_prep['koeficient'] = editor_prep['koeficient'].fillna(1.0)
         
-        # Připravíme finální tabulku pro zobrazení
+        # Finální tabulka
         tabulka_pro_editor = editor_prep[['itemCode', 'itemName', 'finalni_nc', 'koeficient']].copy()
         tabulka_pro_editor.rename(columns={'finalni_nc': 'nakupni_cena'}, inplace=True)
 
         st.subheader("📝 3. Kontrola nákupních cen")
-        st.info("💡 Produkty jsou seřazeny tak, že ty s NULOVOU nákupní cenou (nenalezeny ve feedu) jsou nahoře. Doplňte je.")
+        st.info("💡 Produkty s chybějící NC (0.00) jsou seřazeny nahoře. Můžete je dopsat. Ty z XML a Google Tabulky jsou již vyplněny.")
         
-        # Seřazení tak, aby nuly byly nahoře k doplnění
+        # Nuly řadíme nahoře
         tabulka_pro_editor = tabulka_pro_editor.sort_values(by=['nakupni_cena', 'itemName'], ascending=[True, True]).reset_index(drop=True)
 
         # EDITOR
@@ -152,9 +166,9 @@ else:
         )
 
         if st.button("🚀 SPOČÍTAT FINÁLNÍ ZISK A ULOŽIT", type="primary"):
-            with st.status("Provádím datovou analýzu...", expanded=True) as status:
+            with st.status("Počítám zisk ze všech položek...", expanded=True) as status:
                 
-                # 1. Načtení dat z editoru (včetně změn z obrazovky)
+                # 1. Získání dat (i změn z obrazovky)
                 aktualni_nc = tabulka_pro_editor.copy()
                 state = st.session_state["cenovy_editor"]
                 if "edited_rows" in state:
@@ -162,28 +176,28 @@ else:
                         for col, val in changes.items():
                             aktualni_nc.at[int(idx), col] = val
 
-                # 2. Příprava exportu (Přejmenování starých NC z CSV, kdyby tam náhodou byly)
+                # 2. Vyčištění CSV od případných starých NC
                 df_vypocet = df_obj.copy()
                 if 'nakupni_cena' in df_vypocet.columns:
                     df_vypocet = df_vypocet.rename(columns={'nakupni_cena': 'nc_stara_z_csv'})
 
-                # 3. PÁROVÁNÍ 1:1 NA EXPORT (Přiřazení NC ke každému prodanému kusu)
+                # 3. SPÁROVÁNÍ VŠECH PRODEJŮ S NÁKUPKOU
                 final_merged = pd.merge(df_vypocet, aktualni_nc[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
                 
-                # 4. MATEMATIKA NÁKLADŮ
+                # 4. MATEMATIKA
                 final_merged['nakupni_cena'] = pd.to_numeric(final_merged['nakupni_cena']).fillna(0)
                 final_merged['koeficient'] = pd.to_numeric(final_merged['koeficient']).fillna(1)
                 
-                # Nákupní náklad za každý řádek (Množství * NC * Koeficient)
+                # NÁKLAD = Množství * NC * Koeficient
                 final_merged['naklad_radek'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
 
-                # 5. CELKOVÉ SOUČTY
+                # 5. SOUČTY
                 total_trzby = final_merged['itemTotalPriceWithoutVat'].sum()
                 total_naklady_zbozi = final_merged['naklad_radek'].sum()
                 total_cisty_zisk = total_trzby - total_naklady_zbozi - mkt_cost - doprava_cost
 
                 time.sleep(1)
-                status.update(label="Výpočet dokončen!", state="complete", expanded=False)
+                status.update(label="Analýza úspěšná!", state="complete", expanded=False)
 
             # --- VÝSLEDKY ---
             st.divider()
@@ -197,11 +211,10 @@ else:
 
             if total_cisty_zisk > 0:
                 st.balloons()
-                st.success("Skvělá práce! E-shop je v zisku.")
             else:
                 st.error("Pozor, období končí ve ztrátě!")
 
-            # --- KONTROLNÍ ROZPIS ---
+            # --- ROZPIS PO POLOŽKÁCH ---
             with st.expander("🔍 DETAILNÍ ROZPIS (Tržba vs Náklad po řádcích)"):
                 kontrola_df = final_merged[['itemCode', 'itemName', 'itemAmount', 'itemTotalPriceWithoutVat', 'nakupni_cena', 'naklad_radek']].copy()
                 kontrola_df.columns = ['Kód', 'Produkt', 'Množství', 'TRŽBA (Prodejní)', 'NC / ks', 'NÁKLAD (Celkem)']
@@ -211,10 +224,9 @@ else:
             try:
                 from streamlit_gsheets import GSheetsConnection
                 conn = st.connection("gsheets", type=GSheetsConnection)
-                # Uložíme jen ty záznamy, kde NC > 0, abychom zbytečně neukládali nuly
                 k_ulozeni = aktualni_nc[aktualni_nc['nakupni_cena'] > 0]
                 update_db = pd.concat([pamet_df, k_ulozeni[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
-                st.toast("Ceny uloženy do Google Tabulky!", icon="💾")
+                st.toast("Nové ceny byly trvale uloženy!", icon="💾")
             except Exception as e:
-                st.info("💡 Automatické uložení funguje po propojení Google Service Accountu dle návodu.")
+                st.info("💡 Automatické uložení se aktivuje po propojení Google Service Accountu.")
