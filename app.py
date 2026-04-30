@@ -83,11 +83,14 @@ def load_orders(url):
         df['itemAmount'] = pd.to_numeric(df['itemAmount'], errors='coerce').fillna(1)
         df['itemCode'] = df['itemCode'].astype(str).str.strip()
         
-        # Převod datumu pro filtrování
+        # --- OPRAVA DATUMU ---
+        # Shoptet dává formát 'DD.MM.YYYY HH:MM:SS', např. '01.04.2026 14:30:00'
         if 'date' in df.columns:
-            df['date_parsed'] = pd.to_datetime(df['date'], errors='coerce', dayfirst=True)
-            df['rok'] = df['date_parsed'].dt.year
-            df['mesic'] = df['date_parsed'].dt.month
+            # Převedeme na string a ořízneme jen na datumovou část (před mezerou)
+            df['date_str'] = df['date'].astype(str).str.split(' ').str[0]
+            # Extrakt roku a měsíce přímo z textu (předpokládáme DD.MM.YYYY)
+            df['rok'] = df['date_str'].str.split('.').str[2].astype(float)
+            df['mesic'] = df['date_str'].str.split('.').str[1].astype(float)
         
         return df
     except Exception as e:
@@ -144,10 +147,14 @@ else:
     
     # Filtrovací roletky pro datum
     if not df_vsechny_objednavky.empty and 'rok' in df_vsechny_objednavky.columns:
+        # Odstraníme NaN (neplatné datumy) pro zobrazení v roletce
         roky = sorted(df_vsechny_objednavky['rok'].dropna().unique().astype(int).tolist(), reverse=True)
         mesice = list(range(1, 13))
         
         col_r, col_m, col_mkt, col_dop = st.columns(4)
+        # Pokud by náhodou pole let bylo prázdné, dáme tam aktuální rok jako pojistku
+        if not roky: roky = [pd.Timestamp.now().year]
+        
         vybrany_rok = col_r.selectbox("Rok:", roky)
         vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=(pd.Timestamp.now().month - 1) if pd.Timestamp.now().year == vybrany_rok else 0)
         mkt_cost = col_mkt.number_input("Marketing (bez DPH):", min_value=0.0, step=100.0)
