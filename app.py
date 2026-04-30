@@ -83,7 +83,7 @@ if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🔒 Zabezpečený přístup k financím")
+    st.title("🔒 Zabezpečený přístup")
     heslo = st.text_input("Zadejte heslo:", type="password")
     if st.button("VSTOUPIT"):
         if heslo == HESLO_PRO_VSTUP:
@@ -92,7 +92,7 @@ if not st.session_state.authenticated:
         else:
             st.error("❌ Chybné heslo!")
 else:
-    st.title("💰 Inteligentní analýza zisku")
+    st.title("Analýza zisku")
 
     with st.expander("📖 JAK SYSTÉM FUNGUJE (Rozklikni)"):
         st.markdown("""
