@@ -27,7 +27,7 @@ URL_CSV_GSHEETS = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tq
 XML_FEED_URL = "https://eshop.superpodlaha.cz/export/productsComplete.xml?patternId=-5&partnerId=6&hash=2f7d22f13d30329b53e8cfb4937eb14143c5e09ec1adaea045d098e7248dbfaa"
 ORDERS_CSV_URL = "https://eshop.superpodlaha.cz/export/orders.csv?patternId=-9&partnerId=6&hash=39a4ee9904e1b2fecd432faddac364a49291288ba4f616285a5d1c6ee147d716"
 
-# --- POMOCNÉ FUNKCE (Čištění datumu a čísel) ---
+# --- POMOCNÉ FUNKCE (Ultra agresivní čištění) ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
     if m_iso: return float(m_iso.group(2))
@@ -43,9 +43,9 @@ def extract_year(d):
     return None
 
 def clean_money(column_data):
-    # Vymaže prázdné mezery u tisíců (1 500,00 -> 1500.00) a převede na číslo
-    cleaned = column_data.astype(str).str.replace(r'\s+', '', regex=True).str.replace(',', '.')
-    return pd.to_numeric(cleaned, errors='coerce').fillna(0)
+    # Brutální ořezání: odstraní uvozovky, všechny normální i neviditelné mezery (\xa0), přepíše čárky na tečky
+    cleaned = column_data.astype(str).str.replace('"', '').str.replace(r'[\s\xa0]+', '', regex=True).str.replace(',', '.')
+    return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # --- CACHE: XML FEED ---
 @st.cache_data(ttl=3600)
@@ -84,19 +84,17 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
             df_xml = df_xml.drop_duplicates(subset=['itemCode'], keep='last')
         return df_xml
     except Exception as e:
-        st.error(f"⚠️ Chyba při stahování XML feedu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: EXPORT OBJEDNÁVEK (S OBLBNUTÍM SHOPTET CACHE) ---
+# --- CACHE: EXPORT OBJEDNÁVEK (API) ---
 @st.cache_data(ttl=60)
 def load_orders(url):
     try:
-        # Cache Buster: Přidáme aktuální čas do URL, aby Shoptet nemohl poslat stará data
         clean_url = f"{str(url).strip()}&timestamp={int(time.time())}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(clean_url, headers=headers, timeout=45)
         response.raise_for_status()
-        response.encoding = 'cp1250' # Natvrdo vynutíme české Windows kódování
+        response.encoding = 'cp1250' 
         
         df = pd.read_csv(StringIO(response.text), sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False)
         
@@ -110,7 +108,6 @@ def load_orders(url):
             df['mesic'] = df['date_str'].apply(extract_month)
         return df
     except Exception as e:
-        st.error(f"⚠️ Chyba při automatickém stahování objednávek: {e}")
         return pd.DataFrame()
 
 # --- ZABEZPEČENÍ APLIKACE ---
@@ -129,14 +126,6 @@ if not st.session_state.authenticated:
 else:
     # --- HLAVNÍ APLIKACE ---
     st.title("💰 Plně automatizovaná analýza zisku")
-
-    with st.expander("📖 JAK SYSTÉM FUNGUJE"):
-        st.markdown("""
-        1. **Zdroj dat:** Aplikace bere data tajným odkazem. Pokud odkaz stagnuje, nahrajte soubor ručně do políčka níže.
-        2. **DPH Korekce:** Tržby se počítají z objednávek *bez DPH*. Nákupní ceny se očistí od DPH podle nastavení vlevo.
-        3. **Filtry:** Vyberte si Rok, Měsíc a odfiltrujte storna (Stornováno se vyřadí automaticky).
-        4. **Doplnění NC:** V tabulce doplňte chybějící ceny (NC 0.00). **Ceny zadávejte BEZ DPH.**
-        """)
 
     # --- SIDEBAR ---
     st.sidebar.header("⚙️ Nastavení datového feedu")
@@ -158,21 +147,41 @@ else:
             pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
     st.subheader("📂 1. Zdroj dat (Objednávky)")
-    uploaded_file = st.file_uploader("Volitelné: Nahrát CSV s objednávkami ručně (přepíše automatické API)", type=['csv'])
+    uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (přepíše automatické API)", type=['csv'])
 
-    if uploaded_file:
-        df_vsechny_objednavky = pd.read_csv(uploaded_file, sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False, encoding='cp1250')
-        df_vsechny_objednavky['itemTotalPriceWithoutVat'] = clean_money(df_vsechny_objednavky['itemTotalPriceWithoutVat'])
-        df_vsechny_objednavky['itemAmount'] = clean_money(df_vsechny_objednavky['itemAmount'])
-        df_vsechny_objednavky['itemCode'] = df_vsechny_objednavky['itemCode'].astype(str).str.strip()
-        
-        if 'date' in df_vsechny_objednavky.columns:
-            df_vsechny_objednavky['date_str'] = df_vsechny_objednavky['date'].astype(str).str.strip().str.replace('"', '')
-            df_vsechny_objednavky['rok'] = df_vsechny_objednavky['date_str'].apply(extract_year)
-            df_vsechny_objednavky['mesic'] = df_vsechny_objednavky['date_str'].apply(extract_month)
-        st.success("Data načtena ručně ze souboru!")
-    else:
-        df_vsechny_objednavky = load_orders(ORDERS_CSV_URL)
+    with st.spinner("Louskám data..."):
+        if uploaded_file:
+            df_vsechny_objednavky = pd.read_csv(uploaded_file, sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False, encoding='cp1250')
+            df_vsechny_objednavky['itemTotalPriceWithoutVat'] = clean_money(df_vsechny_objednavky['itemTotalPriceWithoutVat'])
+            df_vsechny_objednavky['itemAmount'] = clean_money(df_vsechny_objednavky['itemAmount'])
+            df_vsechny_objednavky['itemCode'] = df_vsechny_objednavky['itemCode'].astype(str).str.strip()
+            
+            if 'date' in df_vsechny_objednavky.columns:
+                df_vsechny_objednavky['date_str'] = df_vsechny_objednavky['date'].astype(str).str.strip().str.replace('"', '')
+                df_vsechny_objednavky['rok'] = df_vsechny_objednavky['date_str'].apply(extract_year)
+                df_vsechny_objednavky['mesic'] = df_vsechny_objednavky['date_str'].apply(extract_month)
+        else:
+            df_vsechny_objednavky = load_orders(ORDERS_CSV_URL)
+
+    # ==========================================
+    # 🕵️ DIAGNOSTIKA DAT (NOVÁ SEKCE PRO ODHALENÍ CHYBY)
+    # ==========================================
+    if not df_vsechny_objednavky.empty:
+        with st.expander("🕵️ DIAGNOSTIKA DAT (Klikni pro kontrolu chyb)", expanded=True):
+            st.warning(f"**Celkem řádků načteno:** {len(df_vsechny_objednavky)}")
+            
+            diag_col1, diag_col2 = st.columns(2)
+            if 'rok' in df_vsechny_objednavky.columns:
+                diag_col1.write("**Nalezené roky v datech:**")
+                diag_col1.write(df_vsechny_objednavky['rok'].value_counts().to_dict())
+                diag_col2.write("**Nalezené měsíce v datech:**")
+                diag_col2.write(df_vsechny_objednavky['mesic'].value_counts().to_dict())
+            
+            st.write("**Ukázka jak program přečetl tržby (musí tam být skutečná čísla a datumy, ne NaN):**")
+            # Zobrazí prvních 5 řádků, kde zkontrolujeme, jestli datum a ceny sedí
+            if 'date' in df_vsechny_objednavky.columns:
+                st.dataframe(df_vsechny_objednavky[['date', 'rok', 'mesic', 'itemTotalPriceWithoutVat', 'statusName']].head(10))
+    # ==========================================
 
     # --- 2. VÝBĚR OBDOBÍ A NÁKLADŮ ---
     st.subheader("📅 2. Výběr období a fixních nákladů")
@@ -185,11 +194,8 @@ else:
         if not roky: roky = [pd.Timestamp.now().year]
         if not mesice: mesice = list(range(1, 13))
         
-        vybrany_rok = col_r.selectbox("Rok:", roky)
-        
-        current_month = pd.Timestamp.now().month
-        default_month_idx = mesice.index(current_month) if current_month in mesice else 0
-        vybrany_mesic = col_m.selectbox("Měsíc:", mesice, index=default_month_idx)
+        vybrany_rok = col_r.selectbox("Rok:", ["CELÝ ROK"] + roky) # Přidal jsem možnost filtrovat celý rok!
+        vybrany_mesic = col_m.selectbox("Měsíc:", ["VŠECHNY MĚSÍCE"] + mesice)
         
         mkt_cost = col_mkt.number_input("Marketing (bez DPH):", min_value=0.0, step=100.0)
         doprava_cost = col_dop.number_input("Doprava faktury (bez DPH):", min_value=0.0, step=100.0)
@@ -197,21 +203,28 @@ else:
         stavy = []
         if 'statusName' in df_vsechny_objednavky.columns:
             stavy = sorted(df_vsechny_objednavky['statusName'].dropna().unique().tolist())
-            # Zajištění proti paznakům
-            default_stavy = [s for s in stavy if "storno" not in str(s).lower() and "zru" not in str(s).lower()]
-            vybrane_stavy = st.multiselect("Filtrovat stavy objednávek (vyřaďte storna atd.):", stavy, default=default_stavy)
+            default_stavy = [s for s in stavy if "storno" not in str(s).lower() and "zrušen" not in str(s).lower()]
+            vybrane_stavy = st.multiselect("Filtrovat stavy objednávek:", stavy, default=default_stavy)
         
-        df_filtr = df_vsechny_objednavky[(df_vsechny_objednavky['rok'] == float(vybrany_rok)) & (df_vsechny_objednavky['mesic'] == float(vybrany_mesic))]
+        # APLIKACE FILTRŮ (s ohledem na volbu VŠECHNY)
+        df_filtr = df_vsechny_objednavky.copy()
         
+        if vybrany_rok != "CELÝ ROK":
+            df_filtr = df_filtr[df_filtr['rok'] == float(vybrany_rok)]
+        if vybrany_mesic != "VŠECHNY MĚSÍCE":
+            df_filtr = df_filtr[df_filtr['mesic'] == float(vybrany_mesic)]
+            
         if 'statusName' in df_vsechny_objednavky.columns and vybrane_stavy:
             df_filtr = df_filtr[df_filtr['statusName'].isin(vybrane_stavy)]
 
+        st.info(f"Po aplikaci filtrů zůstalo ke zpracování **{len(df_filtr)} řádků** z původních {len(df_vsechny_objednavky)}.")
+
     else:
-        st.error("Nepodařilo se načíst data o datumech z e-shopu. Použijte manuální nahrání.")
+        st.error("Nepodařilo se načíst data o datumech.")
         st.stop()
 
     if df_filtr.empty:
-        st.warning(f"V období {vybrany_mesic}/{vybrany_rok} nejsou evidovány žádné platné objednávky. Zkontrolujte stavy objednávek.")
+        st.warning("V tomto období nezůstala k výpočtu žádná data.")
     else:
         # --- 3. KONTROLA CEN ---
         unikaty = df_filtr[df_filtr['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
@@ -226,7 +239,6 @@ else:
         tabulka_pro_editor.rename(columns={'finalni_nc': 'nakupni_cena'}, inplace=True)
 
         st.subheader("📝 3. Kontrola nákupních cen (BEZ DPH)")
-        st.info(f"Produkty prodané v {vybrany_mesic}/{vybrany_rok}. Pokud chybí NC (0.00), doplňte ji.")
         
         tabulka_pro_editor = tabulka_pro_editor.sort_values(by=['nakupni_cena', 'itemName'], ascending=[True, True]).reset_index(drop=True)
 
@@ -245,7 +257,7 @@ else:
 
         # --- 4. FINÁLNÍ VÝPOČET ---
         if st.button("🚀 SPOČÍTAT ZISK ZA VYBRANÝ MĚSÍC A ULOŽIT", type="primary"):
-            with st.status(f"Zpracovávám data pro {vybrany_mesic}/{vybrany_rok}...", expanded=True) as status:
+            with st.status("Zpracovávám prodeje...", expanded=True) as status:
                 
                 aktualni_nc = tabulka_pro_editor.copy()
                 state = st.session_state["cenovy_editor"]
@@ -262,6 +274,7 @@ else:
                 
                 final_merged['nakupni_cena'] = pd.to_numeric(final_merged['nakupni_cena']).fillna(0)
                 final_merged['koeficient'] = pd.to_numeric(final_merged['koeficient']).fillna(1)
+                
                 final_merged['naklad_radek'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
 
                 total_trzby = final_merged['itemTotalPriceWithoutVat'].sum()
@@ -274,7 +287,7 @@ else:
             # --- VÝSLEDKY ---
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric(f"TRŽBY ({vybrany_mesic}/{vybrany_rok})", f"{total_trzby:,.0f} Kč".replace(',', ' '))
+            c1.metric("TRŽBY", f"{total_trzby:,.0f} Kč".replace(',', ' '))
             c2.metric("NÁKLADY ZBOŽÍ (bez DPH)", f"{total_naklady_zbozi:,.0f} Kč".replace(',', ' '), delta=f"-{total_naklady_zbozi:,.0f}", delta_color="inverse")
             c3.metric("HRUBÁ MARŽE", f"{(total_trzby - total_naklady_zbozi):,.0f} Kč".replace(',', ' '))
             
@@ -284,7 +297,7 @@ else:
             if total_cisty_zisk > 0:
                 st.balloons()
             else:
-                st.error("Vybraný měsíc končí ve ztrátě!")
+                st.error("Skončili jste ve ztrátě!")
 
             # --- ROZPIS PO POLOŽKÁCH ---
             with st.expander("🔍 DETAILNÍ ROZPIS (Tržba bez DPH vs Náklad bez DPH)"):
@@ -299,6 +312,5 @@ else:
                 k_ulozeni = aktualni_nc[aktualni_nc['nakupni_cena'] > 0]
                 update_db = pd.concat([pamet_df, k_ulozeni[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
-                st.toast("Změny cen byly uloženy do databáze!", icon="💾")
             except Exception as e:
                 pass
