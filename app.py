@@ -388,4 +388,3 @@ else:
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
             except Exception as e:
                 pass
-```</Cislo>
