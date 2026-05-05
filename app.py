@@ -90,47 +90,51 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         st.error(f"⚠️ Chyba při stahování XML feedu ze Shoptetu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: CÉZAR XML (125 MB EFEEKTIVNĚ) ---
+# --- CACHE: CÉZAR XML (125 MB EFEKTIVNĚ) ---
 @st.cache_data
 def load_cezar_xml(file_bytes):
     try:
-        # Používáme iterparse pro efektivní zpracování velkého souboru
         context = ET.iterparse(BytesIO(file_bytes), events=('end',))
         cezar_data = []
         
         for event, elem in context:
-            # POZOR: Možná bude nutné 'Row' změnit podle reálného tagu v XML (např. 'Item', 'Record', 'ZboziItem')
-            if elem.tag in ['Row', 'Record', 'Item', 'ZboziItem']: 
-                # Pokus o načtení kódu jako atributu nebo zanořeného elementu
-                kod = elem.get('KodZboziKodPodskladu')
-                if not kod:
-                    kod_elem = elem.find('KodZboziKodPodskladu')
-                    kod = kod_elem.text if kod_elem is not None else None
-                
-                if kod:
-                    # Načtení cen (NCA, NCP, NC) jako atributů nebo elementů
-                    try:
-                        nca = float(elem.get('NCA') or elem.findtext('NCA') or 0)
-                        ncp = float(elem.get('NCP') or elem.findtext('NCP') or 0)
-                        nc = float(elem.get('NC') or elem.findtext('NC') or 0)
-                    except ValueError:
-                        nca, ncp, nc = 0.0, 0.0, 0.0
+            # Hledáme kód zboží pod názvem 'Cislo'
+            kod = elem.get('Cislo')
+            
+            # Pokud není jako atribut, zkusíme najít zanořený tag <Cislo>
+            if not kod:
+                kod_elem = elem.find('Cislo')
+                if kod_elem is not None:
+                    kod = kod_elem.text
                     
-                    # Logika priority cen
-                    vybrana_nc = nca if nca > 0 else (ncp if ncp > 0 else nc)
-                    
-                    if vybrana_nc > 0:
-                        cezar_data.append({
-                            'itemCode': str(kod).strip(),
-                            'nc_cezar': vybrana_nc
-                        })
+            # Zabráníme parsování hlaviček a definic jako jsou <Field> a <FieldDefs>
+            if kod and elem.tag not in ['Field', 'FieldDefs']:
+                try:
+                    nca = float(elem.get('NCA') or elem.findtext('NCA') or 0)
+                    ncp = float(elem.get('NCP') or elem.findtext('NCP') or 0)
+                    nc = float(elem.get('NC') or elem.findtext('NC') or 0)
+                except ValueError:
+                    nca, ncp, nc = 0.0, 0.0, 0.0
                 
-                # Uvolnění z paměti po zpracování uzlu (Zásadní pro velké soubory!)
+                # Priorita: Poslední NC bez DPH (NCP). Pokud není, zkusí další
+                vybrana_nc = ncp if ncp > 0 else (nca if nca > 0 else nc)
+                
+                if vybrana_nc > 0:
+                    cezar_data.append({
+                        'itemCode': str(kod).strip(),
+                        'nc_cezar': vybrana_nc
+                    })
+                
+                # Uvolnění paměti - STĚŽEJNÍ pro stabilitu u 125MB souborů
                 elem.clear()
                 
         df_cezar = pd.DataFrame(cezar_data)
-        if not df_cezar.empty:
-            df_cezar = df_cezar.drop_duplicates(subset=['itemCode'], keep='last')
+        
+        # Pojistka pro prázdnou tabulku, aby se předešlo KeyError 'itemCode'
+        if df_cezar.empty:
+            return pd.DataFrame(columns=['itemCode', 'nc_cezar'])
+            
+        df_cezar = df_cezar.drop_duplicates(subset=['itemCode'], keep='last')
         return df_cezar
 
     except Exception as e:
@@ -384,3 +388,4 @@ else:
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
             except Exception as e:
                 pass
+```</Cislo>
