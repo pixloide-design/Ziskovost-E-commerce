@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
 import time
-from io import StringIO
+from io import StringIO, BytesIO
 import re
 
 # --- KONFIGURACE STRÁNKY ---
@@ -30,6 +30,7 @@ try:
 except KeyError as e:
     st.error(f"❌ Chybí bezpečnostní nastavení (Secrets) ve Streamlitu pro klíč: {e}")
     st.stop()
+
 # --- POMOCNÉ FUNKCE ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
@@ -49,7 +50,7 @@ def clean_money(column_data):
     cleaned = column_data.astype(str).str.replace('"', '').str.replace(r'[\s\xa0]+', '', regex=True).str.replace(',', '.')
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
-# --- CACHE: XML FEED ---
+# --- CACHE: XML FEED SHOPTET ---
 @st.cache_data(ttl=3600)
 def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
     try:
@@ -86,14 +87,60 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
             df_xml = df_xml.drop_duplicates(subset=['itemCode'], keep='last')
         return df_xml
     except Exception as e:
-        st.error(f"⚠️ Chyba při stahování XML feedu: {e}")
+        st.error(f"⚠️ Chyba při stahování XML feedu ze Shoptetu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
+# --- CACHE: CÉZAR XML (125 MB EFEEKTIVNĚ) ---
+@st.cache_data
+def load_cezar_xml(file_bytes):
+    try:
+        # Používáme iterparse pro efektivní zpracování velkého souboru
+        context = ET.iterparse(BytesIO(file_bytes), events=('end',))
+        cezar_data = []
+        
+        for event, elem in context:
+            # POZOR: Možná bude nutné 'Row' změnit podle reálného tagu v XML (např. 'Item', 'Record', 'ZboziItem')
+            if elem.tag in ['Row', 'Record', 'Item', 'ZboziItem']: 
+                # Pokus o načtení kódu jako atributu nebo zanořeného elementu
+                kod = elem.get('KodZboziKodPodskladu')
+                if not kod:
+                    kod_elem = elem.find('KodZboziKodPodskladu')
+                    kod = kod_elem.text if kod_elem is not None else None
+                
+                if kod:
+                    # Načtení cen (NCA, NCP, NC) jako atributů nebo elementů
+                    try:
+                        nca = float(elem.get('NCA') or elem.findtext('NCA') or 0)
+                        ncp = float(elem.get('NCP') or elem.findtext('NCP') or 0)
+                        nc = float(elem.get('NC') or elem.findtext('NC') or 0)
+                    except ValueError:
+                        nca, ncp, nc = 0.0, 0.0, 0.0
+                    
+                    # Logika priority cen
+             vybrana_nc = ncp if ncp > 0 else 0
+                    
+                    if vybrana_nc > 0:
+                        cezar_data.append({
+                            'itemCode': str(kod).strip(),
+                            'nc_cezar': vybrana_nc
+                        })
+                
+                # Uvolnění z paměti po zpracování uzlu (Zásadní pro velké soubory!)
+                elem.clear()
+                
+        df_cezar = pd.DataFrame(cezar_data)
+        if not df_cezar.empty:
+            df_cezar = df_cezar.drop_duplicates(subset=['itemCode'], keep='last')
+        return df_cezar
+
+    except Exception as e:
+        st.error(f"⚠️ Chyba při zpracování Cézar XML: {e}")
+        return pd.DataFrame(columns=['itemCode', 'nc_cezar'])
+
 # --- CACHE: EXPORT OBJEDNÁVEK Z ODKAZU ---
-@st.cache_data(ttl=3600) # Vráceno na hodinu, ať to nestahuje pořád.
+@st.cache_data(ttl=3600)
 def load_orders(url):
     try:
-        # Cache Buster stále funguje, když vyprší TTL nebo klikneš na Vynutit aktualizaci
         clean_url = f"{str(url).strip()}&timestamp={int(time.time())}"
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(clean_url, headers=headers, timeout=45)
@@ -115,10 +162,9 @@ def load_orders(url):
         st.error(f"⚠️ Chyba při stahování objednávek: {e}")
         return pd.DataFrame()
 
-# --- CACHE: ZPRACOVÁNÍ RUČNÍHO SOUBORU ---
+# --- CACHE: ZPRACOVÁNÍ RUČNÍHO SOUBORU OBJEDNÁVEK ---
 @st.cache_data
 def process_uploaded_file(file_bytes):
-    # Zabrání tomu, aby se soubor četl při každém kliknutí znova
     df = pd.read_csv(StringIO(file_bytes.decode('cp1250')), sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False)
     df['itemTotalPriceWithoutVat'] = clean_money(df['itemTotalPriceWithoutVat'])
     df['itemAmount'] = clean_money(df['itemAmount'])
@@ -149,10 +195,11 @@ else:
 
     with st.expander("📖 JAK SYSTÉM FUNGUJE"):
         st.markdown("""
-        1. **Plná automatizace:** Aplikace si sama stahuje seznam objednávek i databázi nákupních cen (NC) z e-shopu.
+        1. **Plná automatizace:** Aplikace si sama stahuje seznam objednávek i databázi nákupních cen z e-shopu.
         2. **DPH Korekce:** Tržby se počítají z objednávek *bez DPH*. Nákupní ceny z XML se automaticky očistí od DPH podle nastavení vlevo.
-        3. **Výběr období:** Zvolte si Rok a Měsíc pro analýzu.
-        4. **Doplnění NC:** V tabulce doplňte chybějící ceny (NC 0.00). Ukládají se napořád do Google Tabulky. **Ceny zadávejte BEZ DPH.** / V PROCESU ! Zatím není napojeno! (Míra)
+        3. **Integrace Cézara:** Můžete nahrát XML z Cézara (až 125 MB). Systém automaticky upřednostní aktuální nákupní cenu z něj.
+        4. **Výběr období:** Zvolte si Rok a Měsíc pro analýzu.
+        5. **Doplnění NC:** V tabulce doplňte chybějící ceny. Ukládají se napořád do Google Tabulky (Tato tabulka má absolutní prioritu).
         """)
 
     # --- SIDEBAR ---
@@ -165,7 +212,7 @@ else:
         st.rerun()
 
     # --- 1. NAČTENÍ DAT ---
-    with st.spinner("Stahuji a zpracovávám data..."):
+    with st.spinner("Stahuji a zpracovávám data ze Shoptetu a Google Sheets..."):
         df_xml = load_xml_feed(XML_FEED_URL, dph_sazba=dph_sazba_xml, ceny_s_dph=xml_ceny_s_dph)
         try:
             pamet_df = pd.read_csv(URL_CSV_GSHEETS)
@@ -174,8 +221,23 @@ else:
         except:
             pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
-    uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (volitelné)", type=['csv'])
+    # Nahrávací políčka (dvou-sloupcový layout)
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (volitelné)", type=['csv'])
+    with col_up2:
+        cezar_file = st.file_uploader("Nahrát XML export z Cézara (volitelné, např. 125 MB)", type=['xml'])
 
+    # Zpracování Cézara
+    if cezar_file:
+        with st.spinner("Zpracovávám data z Cézara... (může to chvíli trvat)"):
+            df_cezar = load_cezar_xml(cezar_file.getvalue())
+            if not df_cezar.empty:
+                st.success(f"✅ Data z Cézara úspěšně načtena (nalezeno {len(df_cezar)} unikátních položek s cenou).")
+    else:
+        df_cezar = pd.DataFrame(columns=['itemCode', 'nc_cezar'])
+
+    # Zpracování objednávek
     if uploaded_file:
         df_vsechny_objednavky = process_uploaded_file(uploaded_file.getvalue())
     else:
@@ -224,17 +286,29 @@ else:
         # --- 3. KONTROLA CEN ---
         unikaty = df_filtr[df_filtr['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
         
+        # Merge dat z feedu Shoptetu
         editor_prep = pd.merge(unikaty, df_xml, on='itemCode', how='left')
+        
+        # Merge dat z Cézara
+        editor_prep = pd.merge(editor_prep, df_cezar, on='itemCode', how='left')
+        
+        # Merge ručních dat z Google Sheets
         editor_prep = pd.merge(editor_prep, pamet_df[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
         
-        editor_prep['finalni_nc'] = editor_prep['nakupni_cena'].fillna(editor_prep['nc_xml']).fillna(0.0)
+        # Prioritizace cen (Ruční Tabulka -> Cézar -> Shoptet XML -> 0.0)
+        editor_prep['finalni_nc'] = (
+            editor_prep['nakupni_cena']
+            .fillna(editor_prep['nc_cezar'])
+            .fillna(editor_prep['nc_xml'])
+            .fillna(0.0)
+        )
         editor_prep['koeficient'] = editor_prep['koeficient'].fillna(1.0)
         
         tabulka_pro_editor = editor_prep[['itemCode', 'itemName', 'finalni_nc', 'koeficient']].copy()
         tabulka_pro_editor.rename(columns={'finalni_nc': 'nakupni_cena'}, inplace=True)
 
         st.subheader("📝 2. Kontrola nákupních cen (BEZ DPH)")
-        st.info(f"Produkty prodané ve vybraném období. Pokud chybí NC (0.00), doplňte ji.")
+        st.info("Produkty prodané ve vybraném období. Zobrazují se předvyplněné hodnoty (Priorita: Vaše ruční oprava > Cézar > Shoptet). Pokud cena chybí (0.00), doplňte ji.")
         
         tabulka_pro_editor = tabulka_pro_editor.sort_values(by=['nakupni_cena', 'itemName'], ascending=[True, True]).reset_index(drop=True)
 
@@ -256,7 +330,7 @@ else:
             with st.status("Zpracovávám prodeje...", expanded=True) as status:
                 
                 aktualni_nc = tabulka_pro_editor.copy()
-                state = st.session_state["cenovy_editor"]
+                state = st.session_state.get("cenovy_editor", {})
                 if "edited_rows" in state:
                     for idx, changes in state["edited_rows"].items():
                         for col, val in changes.items():
