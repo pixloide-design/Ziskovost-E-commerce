@@ -117,7 +117,7 @@ def load_cezar_xml(file_bytes):
                         nca, ncp, nc = 0.0, 0.0, 0.0
                     
                     # Logika priority cen
-             vybrana_nc = ncp if ncp > 0 else 0
+                    vybrana_nc = nca if nca > 0 else (ncp if ncp > 0 else nc)
                     
                     if vybrana_nc > 0:
                         cezar_data.append({
