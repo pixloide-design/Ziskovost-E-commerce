@@ -93,6 +93,15 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
 # --- CACHE: CÉZAR XML (125 MB EFEKTIVNĚ) ---
 @st.cache_data
 def load_cezar_xml(file_bytes):
+    # Pomocná funkce, která zvládne i ceny jako "1 500,50" a udělá z nich čisté číslo
+    def parse_cislo(hodnota):
+        if not hodnota: return 0.0
+        hodnota_str = str(hodnota).replace('\xa0', '').replace(' ', '').strip().replace(',', '.')
+        try:
+            return float(hodnota_str)
+        except ValueError:
+            return 0.0
+
     try:
         context = ET.iterparse(BytesIO(file_bytes), events=('end',))
         cezar_data = []
@@ -101,7 +110,6 @@ def load_cezar_xml(file_bytes):
             # Hledáme kód zboží pod názvem 'Cislo'
             kod = elem.get('Cislo')
             
-            # Pokud není jako atribut, zkusíme najít zanořený tag <Cislo>
             if not kod:
                 kod_elem = elem.find('Cislo')
                 if kod_elem is not None:
@@ -109,15 +117,21 @@ def load_cezar_xml(file_bytes):
                     
             # Zabráníme parsování hlaviček a definic jako jsou <Field> a <FieldDefs>
             if kod and elem.tag not in ['Field', 'FieldDefs']:
-                try:
-                    nca = float(elem.get('NCA') or elem.findtext('NCA') or 0)
-                    ncp = float(elem.get('NCP') or elem.findtext('NCP') or 0)
-                    nc = float(elem.get('NC') or elem.findtext('NC') or 0)
-                except ValueError:
-                    nca, ncp, nc = 0.0, 0.0, 0.0
+                nca = parse_cislo(elem.get('NCA') or elem.findtext('NCA'))
+                ncp = parse_cislo(elem.get('NCP') or elem.findtext('NCP'))
+                nc = parse_cislo(elem.get('NC') or elem.findtext('NC'))
                 
-                # Priorita: Poslední NC bez DPH (NCP). Pokud není, zkusí další
                 vybrana_nc = ncp if ncp > 0 else (nca if nca > 0 else nc)
+                
+                # --- PŘEPOČET NA 1 m2 (Dle hodnoty v tagu BaleniZakl) ---
+                hodnota_z_cezara = parse_cislo(elem.get('BaleniZakl') or elem.findtext('BaleniZakl'))
+                
+                if hodnota_z_cezara > 0:
+                    # Udělá z 400 hodnotu 4 (m2)
+                    pocet_m2 = hodnota_z_cezara / 100.0 
+                    # Vydělí nákupní cenu za balení počtem metrů čtverečních
+                    vybrana_nc = vybrana_nc / pocet_m2
+                # --------------------------------------------------------
                 
                 if vybrana_nc > 0:
                     cezar_data.append({
@@ -200,8 +214,8 @@ else:
     with st.expander("📖 JAK SYSTÉM FUNGUJE"):
         st.markdown("""
         1. **Plná automatizace:** Aplikace si sama stahuje seznam objednávek i databázi nákupních cen z e-shopu.
-        2. **DPH Korekce:** Tržby se počítají z objednávek *bez DPH*. Nákupní ceny z XML se automaticky očistí od DPH podle nastavení vlevo.
-        3. **Integrace Cézara:** Můžete nahrát XML z Cézara (až 125 MB). Systém automaticky upřednostní aktuální nákupní cenu z něj.
+        2. **DPH Korekce:** Tržby se počítají z objednávek *bez DPH*. Nákupní ceny ze Shoptet XML se automaticky očistí od DPH podle nastavení vlevo. Cézar přenáší hodnoty již bez DPH.
+        3. **Integrace Cézara:** Můžete nahrát XML z Cézara (až 125 MB). Systém automaticky upřednostní aktuální nákupní cenu z něj a přepočítá balení na m2 podle tagu BaleniZakl.
         4. **Výběr období:** Zvolte si Rok a Měsíc pro analýzu.
         5. **Doplnění NC:** V tabulce doplňte chybějící ceny. Ukládají se napořád do Google Tabulky (Tato tabulka má absolutní prioritu).
         """)
