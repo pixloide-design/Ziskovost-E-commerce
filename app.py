@@ -60,9 +60,11 @@ def remove_accents(input_str):
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def create_praha_dashboard_pdf(data_a, data_b, label_a, label_b, obdobi_text):
+    """Vygeneruje PDF report porovnávající dvě konkrétní vybraná období."""
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
     
+    # Hlavička
     pdf.set_font("helvetica", "B", 18)
     pdf.cell(0, 10, remove_accents("SROVNAVACI REPORT PRODEJU: PRAHA"), ln=True, align="C")
     pdf.set_font("helvetica", "", 10)
@@ -75,39 +77,67 @@ def create_praha_dashboard_pdf(data_a, data_b, label_a, label_b, obdobi_text):
         pdf.cell(0, 10, remove_accents(titulek), ln=True, fill=True)
         pdf.ln(4)
         
+        # Hodnoty A
         t_a = d_a['itemTotalPriceWithoutVat'].sum() if not d_a.empty else 0
         p_a = d_a['code'].nunique() if not d_a.empty else 0
         
+        # Hodnoty B
         t_b = d_b['itemTotalPriceWithoutVat'].sum() if not d_b.empty else 0
         p_b = d_b['code'].nunique() if not d_b.empty else 0
         
-        zmena = ((t_b - t_a) / t_a * 100) if t_a > 0 else 0
-        znamenko = "+" if zmena > 0 else ""
+        # Výpočet změny tržeb
+        zmena_t = ((t_b - t_a) / t_a * 100) if t_a > 0 else 0
+        znamenko_t = "+" if zmena_t > 0 else ""
+        
+        # Výpočet změny počtu objednávek
+        zmena_p = ((p_b - p_a) / p_a * 100) if p_a > 0 else 0
+        znamenko_p = "+" if zmena_p > 0 else ""
 
+        # --- ŘÁDEK 1: Nadpisy období ---
         pdf.set_font("helvetica", "B", 11)
         pdf.cell(95, 8, remove_accents(f"OBDOBI A ({label_a})"))
-        pdf.cell(95, 8, remove_accents(f"OBDOBI B ({label_b})"))
-        pdf.ln()
+        # ln=True na konci buňky natvrdo zalomí řádek a zabrání překrývání
+        pdf.cell(95, 8, remove_accents(f"OBDOBI B ({label_b})"), ln=True) 
         
+        # --- ŘÁDEK 2: Konkrétní čísla ---
         pdf.set_font("helvetica", "", 11)
         pdf.cell(95, 7, f"Trzby: {t_a:,.0f} CZK / {p_a} obj.")
-        pdf.cell(95, 7, f"Trzby: {t_b:,.0f} CZK / {p_b} obj.")
-        pdf.ln()
+        pdf.cell(95, 7, f"Trzby: {t_b:,.0f} CZK / {p_b} obj.", ln=True)
+        pdf.ln(3) # Malá mezera před výsledky
         
+        # --- ŘÁDEK 3: Procentuální změny ---
         pdf.set_font("helvetica", "B", 11)
-        if zmena > 0:
+        
+        # Barva a výpis pro Tržby
+        if zmena_t > 0:
             pdf.set_text_color(0, 100, 0)
-        elif zmena < 0:
+        elif zmena_t < 0:
             pdf.set_text_color(150, 0, 0)
         else:
             pdf.set_text_color(0, 0, 0)
             
-        pdf.cell(0, 8, remove_accents(f"CELKOVA ZMENA TRZEB: {znamenko}{zmena:.1f} %"), ln=True)
+        txt_t = remove_accents(f"ZMENA TRZEB: {znamenko_t}{zmena_t:.1f} %")
+        pdf.cell(95, 8, txt_t)
+        
+        # Barva a výpis pro Objednávky
+        if zmena_p > 0:
+            pdf.set_text_color(0, 100, 0)
+        elif zmena_p < 0:
+            pdf.set_text_color(150, 0, 0)
+        else:
+            pdf.set_text_color(0, 0, 0)
+            
+        txt_p = remove_accents(f"ZMENA OBJEDNAVEK: {znamenko_p}{zmena_p:.1f} %")
+        pdf.cell(95, 8, txt_p, ln=True)
+        
+        # Reset barev a odsazení pro další blok
         pdf.set_text_color(0, 0, 0)
         pdf.ln(8)
 
+    # 1. Celková Praha
     vloz_sekci("CELKOVA PRAHA (VSECHNY DOPRAVY)", data_a, data_b)
     
+    # 2. Jednotlivé kategorie
     for kat in ['Osobní odběr', 'Vlastní doprava', 'Běžná doprava']:
         d_kat_a = data_a[data_a['Typ_dopravy'] == kat]
         d_kat_b = data_b[data_b['Typ_dopravy'] == kat]
