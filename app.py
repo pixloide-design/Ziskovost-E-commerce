@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 import time
 from io import StringIO, BytesIO
 import re
+import altair as alt
 from fpdf import FPDF
 import unicodedata
 
@@ -565,11 +566,32 @@ else:
 
             # --- 2. GRAF MĚSÍČNÍHO ROZPADU ---
             st.subheader("📅 Měsíční srovnání tržeb (A vs B)")
+            
             chart_a = df_a.groupby('mesic')['itemTotalPriceWithoutVat'].sum().reset_index()
             chart_b = df_b.groupby('mesic')['itemTotalPriceWithoutVat'].sum().reset_index()
-            chart_data = pd.merge(chart_a, chart_b, on='mesic', how='outer', suffixes=('_A', '_B')).fillna(0).set_index('mesic')
-            chart_data.columns = [f"Tržby {rok_a}", f"Tržby {rok_b}"]
-            st.bar_chart(chart_data)
+            
+            # Sloučení dat a zajištění celých čísel u měsíců
+            chart_data = pd.merge(chart_a, chart_b, on='mesic', how='outer', suffixes=('_A', '_B')).fillna(0)
+            chart_data['mesic'] = chart_data['mesic'].astype(int)
+            
+            # Přejmenování pro legendu
+            nazev_a = f"Období A ({rok_a})"
+            nazev_b = f"Období B ({rok_b})"
+            chart_data = chart_data.rename(columns={'itemTotalPriceWithoutVat_A': nazev_a, 'itemTotalPriceWithoutVat_B': nazev_b})
+            
+            # Převod dat do formátu pro profesionální graf (Melt)
+            melted_data = chart_data.melt('mesic', var_name='Období', value_name='Tržby')
+            
+            # Vykreslení přes Altair: Sloupce vedle sebe (xOffset), na výšku, barvy Magenta a Cyan
+            graf = alt.Chart(melted_data).mark_bar().encode(
+                x=alt.X('mesic:O', title='Měsíc', axis=alt.Axis(labelAngle=0)),
+                y=alt.Y('Tržby:Q', title='Tržby bez DPH (Kč)'),
+                color=alt.Color('Období:N', scale=alt.Scale(range=['#FF00FF', '#00FFFF']), legend=alt.Legend(title="Srovnání", orient='top')),
+                xOffset='Období:N',
+                tooltip=['mesic', 'Období', alt.Tooltip('Tržby:Q', format=',.0f')]
+            ).configure_view(strokeWidth=0)
+            
+            st.altair_chart(graf, use_container_width=True)
 
             # --- 3. ROZPAD PODLE DOPRAV ---
             st.subheader("🚛 Rozdělení podle typu logistiky")
