@@ -1,14 +1,11 @@
 import streamlit as st
 import pandas as pd
-import requests  # <-- TENTO ŘÁDEK TI V KÓDU CHYBÍ
+import numpy as np  # <-- PŘIDÁNO PRO BEZPEČNÉ VÝPOČTY (Dělení nulou u %)
+import requests
 import xml.etree.ElementTree as ET
 import time
 from io import StringIO, BytesIO
 import re
-from fpdf import FPDF
-import unicodedata
-
-# --- NOVÉ IMPORTY PRO PDF (Krok 2) ---
 from fpdf import FPDF
 import unicodedata
 
@@ -56,65 +53,55 @@ def clean_money(column_data):
     cleaned = column_data.astype(str).str.replace('"', '').str.replace(r'[\s\xa0]+', '', regex=True).str.replace(',', '.')
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
-# --- NOVÉ FUNKCE PRO PDF (Krok 2) ---
+# --- FUNKCE PRO PDF (Praha) ---
 def remove_accents(input_str):
     """Odstraní diakritiku pro bezpečný export do základního PDF fontu."""
     if not isinstance(input_str, str): return str(input_str)
     nfkd_form = unicodedata.normalize('NFKD', input_str)
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
-def create_praha_pdf(df_pivot_trzby, df_pivot_objednavky, roky):
-    """Vygeneruje PDF report."""
+def create_praha_pdf(df_trzby, df_objednavky, roky, obdobi_text):
+    """Vygeneruje PDF report s rozdělením na dopravu a odběr."""
     pdf = FPDF(orientation="L", unit="mm", format="A4")
     pdf.add_page()
     pdf.set_font("helvetica", "B", 16)
     
     # Hlavička
-    pdf.cell(0, 10, remove_accents("REPORT PRODEJU - PRAHA (Mezirocni srovnani)"), ln=True, align="C")
+    pdf.cell(0, 10, remove_accents(f"KOMPLEXNI REPORT PRODEJU - PRAHA"), ln=True, align="C")
+    pdf.set_font("helvetica", "", 10)
+    pdf.cell(0, 7, remove_accents(f"Obdobi: {obdobi_text}"), ln=True, align="C")
     pdf.ln(10)
     
-    # TRŽBY TABULKA
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 10, remove_accents("TRZBY BEZ DPH (v CZK)"), ln=True)
-    pdf.set_font("helvetica", "", 10)
-    
-    # Hlavička tabulky
-    pdf.cell(30, 10, remove_accents("Mesic"), border=1)
-    for rok in roky:
-        pdf.cell(40, 10, str(rok), border=1, align="R")
-    pdf.ln()
-    
-    # Data tabulky
-    for index, row in df_pivot_trzby.iterrows():
-        pdf.cell(30, 10, str(index), border=1)
+    def vloz_tabulku(titulek, df_pivot, format_meny=False):
+        pdf.set_font("helvetica", "B", 12)
+        pdf.cell(0, 10, remove_accents(titulek), ln=True)
+        pdf.set_font("helvetica", "", 9)
+        
+        # Hlavička tabulky
+        pdf.cell(25, 8, remove_accents("Mesic"), border=1, align="C")
         for rok in roky:
-            val = row.get(rok, 0)
-            formatted_val = f"{val:,.0f}".replace(",", " ") if pd.notna(val) else "0"
-            pdf.cell(40, 10, formatted_val, border=1, align="R")
+            pdf.cell(35, 8, str(int(rok)), border=1, align="R")
         pdf.ln()
         
-    pdf.ln(10)
-    
-    # OBJEDNÁVKY TABULKA
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 10, remove_accents("POCET OBJEDNAVEK"), ln=True)
-    pdf.set_font("helvetica", "", 10)
-    
-    pdf.cell(30, 10, remove_accents("Mesic"), border=1)
-    for rok in roky:
-        pdf.cell(40, 10, str(rok), border=1, align="R")
-    pdf.ln()
-    
-    for index, row in df_pivot_objednavky.iterrows():
-        pdf.cell(30, 10, str(index), border=1)
-        for rok in roky:
-            val = row.get(rok, 0)
-            formatted_val = f"{val:.0f}" if pd.notna(val) else "0"
-            pdf.cell(40, 10, formatted_val, border=1, align="R")
-        pdf.ln()
-        
-    return pdf.output(dest="S").encode("latin-1")
+        # Data
+        for index, row in df_pivot.iterrows():
+            pdf.cell(25, 8, str(int(index)), border=1, align="C")
+            for rok in roky:
+                val = row.get(rok, 0)
+                if format_meny:
+                    f_val = f"{val:,.0f}".replace(",", " ")
+                else:
+                    f_val = f"{val:.0f}"
+                pdf.cell(35, 8, f_val, border=1, align="R")
+            pdf.ln()
+        pdf.ln(5)
 
+    # Vložíme tabulky pro Tržby a Objednávky
+    vloz_tabulku("TRZBY BEZ DPH (CZK)", df_trzby, format_meny=True)
+    vloz_tabulku("POCET OBJEDNAVEK", df_objednavky, format_meny=False)
+    
+    # Výstup jako bytes (oprava AttributeError pro fpdf2)
+    return bytes(pdf.output())
 
 # --- CACHE: XML FEED SHOPTET ---
 @st.cache_data(ttl=3600)
@@ -271,9 +258,12 @@ if not st.session_state.authenticated:
         else:
             st.error("❌ Chybné heslo! Zkuste to znovu.")
 else:
-    # --- HLAVNÍ APLIKACE ROZDĚLENÁ NA ZÁLOŽKY (Krok 3 a 4) ---
-    tab_zisk, tab_praha = st.tabs(["💰 Analýza Zisku (Aktuální)", "🏙️ Report Praha (Meziroční)"])
+    # --- HLAVNÍ APLIKACE ROZDĚLENÁ NA ZÁLOŽKY ---
+    tab_zisk, tab_praha = st.tabs(["💰 Analýza Zisku (Aktuální)", "🏙️ Report Praha (Komplexní)"])
 
+    # ==========================================
+    # ZÁLOŽKA 1: ANALÝZA ZISKU
+    # ==========================================
     with tab_zisk:
         st.title("Analýza zisku")
 
@@ -305,14 +295,12 @@ else:
             except:
                 pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
-        # Nahrávací políčka (dvou-sloupcový layout)
         col_up1, col_up2 = st.columns(2)
         with col_up1:
             uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (volitelné)", type=['csv'])
         with col_up2:
             cezar_file = st.file_uploader("Nahrát XML export z Cézara (volitelné, např. 125 MB)", type=['xml'])
 
-        # Zpracování Cézara
         if cezar_file:
             with st.spinner("Zpracovávám data z Cézara... (může to chvíli trvat)"):
                 df_cezar = load_cezar_xml(cezar_file.getvalue())
@@ -321,7 +309,6 @@ else:
         else:
             df_cezar = pd.DataFrame(columns=['itemCode', 'nc_cezar'])
 
-        # Zpracování objednávek
         if uploaded_file:
             df_vsechny_objednavky = process_uploaded_file(uploaded_file.getvalue())
         else:
@@ -369,17 +356,10 @@ else:
         else:
             # --- 3. KONTROLA CEN ---
             unikaty = df_filtr[df_filtr['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
-            
-            # Merge dat z feedu Shoptetu
             editor_prep = pd.merge(unikaty, df_xml, on='itemCode', how='left')
-            
-            # Merge dat z Cézara
             editor_prep = pd.merge(editor_prep, df_cezar, on='itemCode', how='left')
-            
-            # Merge ručních dat z Google Sheets
             editor_prep = pd.merge(editor_prep, pamet_df[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
             
-            # Prioritizace cen (Ruční Tabulka -> Cézar -> Shoptet XML -> 0.0)
             editor_prep['finalni_nc'] = (
                 editor_prep['nakupni_cena']
                 .fillna(editor_prep['nc_cezar'])
@@ -441,7 +421,6 @@ else:
                 # --- VÝSLEDKY ---
                 st.divider()
                 
-                # 🎈 SPUSŤ BALÓNKY, POKUD JSME V PLUSU!
                 if total_cisty_zisk > 0:
                     st.balloons()
                     
@@ -456,13 +435,11 @@ else:
                 if total_cisty_zisk <= 0:
                     st.error("Vybrané období končí ve ztrátě!")
 
-                # --- ROZPIS PO POLOŽKÁCH ---
                 with st.expander("🔍 DETAILNÍ ROZPIS (Tržba bez DPH vs Náklad bez DPH)"):
                     kontrola_df = final_merged[['itemCode', 'itemName', 'statusName', 'itemAmount', 'itemTotalPriceWithoutVat', 'nakupni_cena', 'naklad_radek']].copy()
                     kontrola_df.columns = ['Kód', 'Produkt', 'Stav', 'Množství', 'TRŽBA (bez DPH)', 'NC / ks (bez DPH)', 'NÁKLAD (Celkem)']
                     st.dataframe(kontrola_df, use_container_width=True)
 
-                # --- ULOŽENÍ DO GOOGLE SHEETS ---
                 try:
                     from streamlit_gsheets import GSheetsConnection
                     conn = st.connection("gsheets", type=GSheetsConnection)
@@ -472,101 +449,96 @@ else:
                 except Exception as e:
                     pass
 
-    # --- DRUHÁ ZÁLOŽKA PRO REPORT Z PRAHY (Krok 4) ---
+    # ==========================================
+    # ZÁLOŽKA 2: KOMPLEXNÍ REPORT PRAHA
+    # ==========================================
     with tab_praha:
-        st.title("🏙️ Komplexní analýza prodejů: Praha")
-        st.markdown("Srovnání měsíců a let (Počet objednávek a Tržby bez DPH) pro fakturační nebo doručovací adresu v Praze.")
+        st.title("🏙️ Komplexní analýza: Praha")
         
-        # Zkontrolujeme, zda máme stažená/nahraná data z první záložky
         if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
             df = df_vsechny_objednavky.copy()
             
-            # Bezpečné zacházení s chybějícími sloupci a hodnotami
+            # 1. Filtrování na Prahu
             for col in ['billCity', 'deliveryCity']:
                 if col not in df.columns:
                     df[col] = ""
                 df[col] = df[col].astype(str).fillna('')
-                
-            # Filtrujeme na Prahu (nezávisle na velikosti písmen)
+            
             mask_praha = df['billCity'].str.contains('Praha|Prague', case=False) | df['deliveryCity'].str.contains('Praha|Prague', case=False)
-            df_praha = df[mask_praha]
+            df_praha = df[mask_praha].copy()
             
-            # Odstraníme stornované objednávky pro čistá data reportu
+            # 2. Odstranění storen
             if 'statusName' in df_praha.columns:
-                df_praha = df_praha[~df_praha['statusName'].str.contains('storno', case=False, na=False)]
-            
+                df_praha = df_praha[~df_praha['statusName'].str.contains('storno|zrušen', case=False, na=False)]
+
+            # 3. Rozdělení DOPRAVA vs OSOBNÍ ODBĚR
+            if 'shippingName' not in df_praha.columns:
+                df_praha['shippingName'] = ""
+                
+            osobni_klicova_slova = 'osobní|odběr|vyzvednutí|prodejna|sklad'
+            df_praha['typ_logistiky'] = df_praha['shippingName'].apply(
+                lambda x: 'Osobní odběr' if re.search(osobni_klicova_slova, str(x), re.IGNORECASE) else 'Doprava'
+            )
+
             if df_praha.empty:
-                st.warning("V datech nebyly nalezeny žádné relevantní objednávky pro Prahu.")
+                st.warning("V datech nejsou žádné prokazatelné objednávky pro Prahu.")
             else:
-                # Agregace dat: Prvně seskupíme podle kódu objednávky (abychom sečetli položky uvnitř jedné objednávky a nepočítali objednávku vícekrát)
-                df_praha_orders = df_praha.groupby(['code', 'rok', 'mesic']).agg({
-                    'itemTotalPriceWithoutVat': 'sum'
-                }).reset_index()
+                # Informace o období
+                min_date = df_praha['date_str'].min()
+                max_date = df_praha['date_str'].max()
+                obdobi_text = f"{min_date} až {max_date}"
+                st.info(f"📅 Analyzované období v datech: **{obdobi_text}**")
+
+                # Volba zobrazení
+                typ_view = st.radio("Zvolte rozbor k zobrazení a exportu:", ["Vše dohromady", "Pouze Doprava", "Pouze Osobní odběr"], horizontal=True)
                 
-                # Nyní agregujeme podle roku a měsíce
-                report = df_praha_orders.groupby(['rok', 'mesic']).agg(
-                    trzby=('itemTotalPriceWithoutVat', 'sum'),
-                    pocet_objednavek=('code', 'nunique')
-                ).reset_index()
-                
-                # Zajištění celých čísel u data
-                report['rok'] = report['rok'].astype(int)
-                report['mesic'] = report['mesic'].astype(int)
-                
-                roky = sorted(report['rok'].unique())
-                
-                # Vytvoření Pivot Tabulek (Kontingenčních tabulek pro zobrazení)
-                pivot_trzby = report.pivot(index='mesic', columns='rok', values='trzby').fillna(0)
-                pivot_objednavky = report.pivot(index='mesic', columns='rok', values='pocet_objednavek').fillna(0)
-                
-                # Pokud máme alespoň dva různé roky, přidáme sloupec s % meziročním srovnáním (poslední vs předposlední rok)
-                if len(roky) >= 2:
-                    akt_rok = roky[-1]
-                    pred_rok = roky[-2]
+                df_final = df_praha.copy()
+                if typ_view == "Pouze Doprava":
+                    df_final = df_praha[df_praha['typ_logistiky'] == 'Doprava']
+                elif typ_view == "Pouze Osobní odběr":
+                    df_final = df_praha[df_praha['typ_logistiky'] == 'Osobní odběr']
+
+                if df_final.empty:
+                    st.warning(f"Pro zvolený typ ({typ_view}) nejsou v Praze žádná data.")
+                else:
+                    # Agregace dat (nejprve seskupit položky jedné objednávky)
+                    order_agg = df_final.groupby(['code', 'rok', 'mesic']).agg({'itemTotalPriceWithoutVat': 'sum'}).reset_index()
+                    report = order_agg.groupby(['rok', 'mesic']).agg(
+                        trzby=('itemTotalPriceWithoutVat', 'sum'),
+                        pocet=('code', 'nunique')
+                    ).reset_index()
                     
-                    # Výpočet rozdílu (ošetření dělení nulou)
-                    pivot_trzby[f'YoY % ({pred_rok} -> {akt_rok})'] = (pivot_trzby[akt_rok] - pivot_trzby[pred_rok]) / pivot_trzby[pred_rok].replace(0, pd.NA) * 100
-                    pivot_objednavky[f'YoY % ({pred_rok} -> {akt_rok})'] = (pivot_objednavky[akt_rok] - pivot_objednavky[pred_rok]) / pivot_objednavky[pred_rok].replace(0, pd.NA) * 100
+                    roky = sorted(report['rok'].unique().astype(int))
+                    pivot_trzby = report.pivot(index='mesic', columns='rok', values='trzby').fillna(0)
+                    pivot_pocet = report.pivot(index='mesic', columns='rok', values='pocet').fillna(0)
 
-                # --- VYKRESLENÍ V UI ---
-                st.subheader("💰 Tržby bez DPH v jednotlivých měsících")
-                
-                # Pro hezké zobrazení naformátujeme procenta a měny
-                format_trzby = {rok: "{:,.0f} Kč".format for rok in roky}
-                if len(roky) >= 2:
-                    format_trzby[f'YoY % ({pred_rok} -> {akt_rok})'] = "{:,.1f} %".format
-                st.dataframe(pivot_trzby.style.format(format_trzby), use_container_width=True)
-                
-                # Vizuální graf tržeb
-                st.bar_chart(pivot_trzby[roky]) # Graf pouze s daty z let
-                
-                st.subheader("📦 Počet objednávek v jednotlivých měsících")
-                
-                format_objednavky = {rok: "{:.0f}".format for rok in roky}
-                if len(roky) >= 2:
-                    format_objednavky[f'YoY % ({pred_rok} -> {akt_rok})'] = "{:,.1f} %".format
-                st.dataframe(pivot_objednavky.style.format(format_objednavky), use_container_width=True)
-                
-                # Celkové statistiky
-                st.divider()
-                st.subheader("Celková čísla za Prahu (celé dostupné období)")
-                col1, col2 = st.columns(2)
-                col1.metric("Celkové tržby (bez DPH)", f"{df_praha_orders['itemTotalPriceWithoutVat'].sum():,.0f} Kč".replace(",", " "))
-                col2.metric("Celkový počet objednávek", f"{df_praha_orders['code'].nunique():,.0f}".replace(",", " "))
+                    # YoY Výpočet nárůstu (pokud máme data aspoň ze 2 let)
+                    if len(roky) >= 2:
+                        y1, y2 = roky[-2], roky[-1]
+                        pivot_trzby[f'Nárůst % ({y1}→{y2})'] = ((pivot_trzby[y2] - pivot_trzby[y1]) / pivot_trzby[y1].replace(0, np.nan) * 100).fillna(0)
 
-                # --- EXPORT DO PDF ---
-                st.divider()
-                st.subheader("📄 Export Reportu")
-                
-                # Volání funkce a generování bytestreamu
-                pdf_bytes = create_praha_pdf(pivot_trzby[roky], pivot_objednavky[roky], roky)
-                
-                st.download_button(
-                    label="⬇️ Stáhnout report pro Prahu (.PDF)",
-                    data=pdf_bytes,
-                    file_name="report_praha.pdf",
-                    mime="application/pdf",
-                    type="primary"
-                )
+                    # UI Výstup
+                    st.subheader(f"📊 Výsledky: {typ_view}")
+                    
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write("**Tržby bez DPH**")
+                        st.dataframe(pivot_trzby.style.format(precision=0), use_container_width=True)
+                    with c2:
+                        st.write("**Počet objednávek**")
+                        st.dataframe(pivot_pocet.style.format(precision=0), use_container_width=True)
+
+                    st.bar_chart(pivot_trzby[roky])
+
+                    # Export
+                    st.divider()
+                    pdf_data = create_praha_pdf(pivot_trzby[roky], pivot_pocet[roky], roky, obdobi_text)
+                    st.download_button(
+                        "⬇️ Stáhnout kompletní PDF report",
+                        data=pdf_data,
+                        file_name=f"report_praha_{typ_view.replace(' ', '_')}.pdf",
+                        mime="application/pdf",
+                        type="primary"
+                    )
         else:
-            st.info("Nejprve prosím nahrajte nebo stáhněte CSV s objednávkami v hlavní záložce 'Analýza Zisku'.")
+            st.warning("Nahrajte data v první záložce (Analýza Zisku).")
