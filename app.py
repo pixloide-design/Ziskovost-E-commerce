@@ -468,7 +468,7 @@ else:
     # ==========================================
     ("🏙️ Srovnávací analýza: Praha")
         
-    if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
+        if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
             # Příprava dat (kategorizace)
             df = df_vsechny_objednavky.copy()
             for col in ['billCity', 'deliveryCity']:
