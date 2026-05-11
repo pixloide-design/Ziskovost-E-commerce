@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-import numpy as np  # <-- PŘIDÁNO PRO BEZPEČNÉ VÝPOČTY (Dělení nulou u %)
+import numpy as np
 import requests
 import xml.etree.ElementTree as ET
 import time
@@ -55,17 +55,14 @@ def clean_money(column_data):
 
 # --- FUNKCE PRO PDF (Praha) ---
 def remove_accents(input_str):
-    """Odstraní diakritiku pro bezpečný export do základního PDF fontu."""
     if not isinstance(input_str, str): return str(input_str)
     nfkd_form = unicodedata.normalize('NFKD', input_str)
     return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def create_praha_dashboard_pdf(data_a, data_b, label_a, label_b, obdobi_text):
-    """Vygeneruje PDF report porovnávající dvě konkrétní vybraná období."""
     pdf = FPDF(orientation="P", unit="mm", format="A4")
     pdf.add_page()
     
-    # Hlavička
     pdf.set_font("helvetica", "B", 18)
     pdf.cell(0, 10, remove_accents("SROVNAVACI REPORT PRODEJU: PRAHA"), ln=True, align="C")
     pdf.set_font("helvetica", "", 10)
@@ -78,15 +75,12 @@ def create_praha_dashboard_pdf(data_a, data_b, label_a, label_b, obdobi_text):
         pdf.cell(0, 10, remove_accents(titulek), ln=True, fill=True)
         pdf.ln(4)
         
-        # Data pro Období A
-        t_a = d_a['itemTotalPriceWithoutVat'].sum()
-        p_a = d_a['code'].nunique()
+        t_a = d_a['itemTotalPriceWithoutVat'].sum() if not d_a.empty else 0
+        p_a = d_a['code'].nunique() if not d_a.empty else 0
         
-        # Data pro Období B
-        t_b = d_b['itemTotalPriceWithoutVat'].sum()
-        p_b = d_b['code'].nunique()
+        t_b = d_b['itemTotalPriceWithoutVat'].sum() if not d_b.empty else 0
+        p_b = d_b['code'].nunique() if not d_b.empty else 0
         
-        # Výpočet změny
         zmena = ((t_b - t_a) / t_a * 100) if t_a > 0 else 0
         znamenko = "+" if zmena > 0 else ""
 
@@ -101,15 +95,19 @@ def create_praha_dashboard_pdf(data_a, data_b, label_a, label_b, obdobi_text):
         pdf.ln()
         
         pdf.set_font("helvetica", "B", 11)
-        pdf.set_text_color(0, 100, 0) if zmena > 0 else pdf.set_text_color(150, 0, 0)
+        if zmena > 0:
+            pdf.set_text_color(0, 100, 0)
+        elif zmena < 0:
+            pdf.set_text_color(150, 0, 0)
+        else:
+            pdf.set_text_color(0, 0, 0)
+            
         pdf.cell(0, 8, remove_accents(f"CELKOVA ZMENA TRZEB: {znamenko}{zmena:.1f} %"), ln=True)
         pdf.set_text_color(0, 0, 0)
         pdf.ln(8)
 
-    # Celková Praha
     vloz_sekci("CELKOVA PRAHA (VSECHNY DOPRAVY)", data_a, data_b)
     
-    # Rozdělení podle kategorií
     for kat in ['Osobní odběr', 'Vlastní doprava', 'Běžná doprava']:
         d_kat_a = data_a[data_a['Typ_dopravy'] == kat]
         d_kat_b = data_b[data_b['Typ_dopravy'] == kat]
@@ -273,7 +271,7 @@ if not st.session_state.authenticated:
             st.error("❌ Chybné heslo! Zkuste to znovu.")
 else:
     # --- HLAVNÍ APLIKACE ROZDĚLENÁ NA ZÁLOŽKY ---
-    tab_zisk, tab_praha = st.tabs(["💰 Analýza Zisku (Aktuální)", "🏙️ Report Praha (Komplexní)"])
+    tab_zisk, tab_praha = st.tabs(["💰 Analýza Zisku (Aktuální)", "🏙️ Srovnávací analýza: Praha"])
 
     # ==========================================
     # ZÁLOŽKA 1: ANALÝZA ZISKU
@@ -466,10 +464,10 @@ else:
     # ==========================================
     # ZÁLOŽKA 2: KOMPLEXNÍ REPORT PRAHA
     # ==========================================
-    ("🏙️ Srovnávací analýza: Praha")
+    with tab_praha:
+        st.title("🏙️ Srovnávací analýza: Praha")
         
-            if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
-            # Příprava dat (kategorizace)
+        if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
             df = df_vsechny_objednavky.copy()
             for col in ['billCity', 'deliveryCity']:
                 df[col] = df[col].astype(str).fillna('')
@@ -482,14 +480,17 @@ else:
 
             def urci_kategorii(items_text):
                 text = str(items_text).lower()
-                if any(x in text for x in ['naše doprava', 'povezeme sami', 'vlastní doprava']): return 'Vlastní doprava'
-                if re.search('osobní|odběr|vyzvednutí|prodejna|sklad', text): return 'Osobní odběr'
+                if any(x in text for x in ['naše doprava', 'povezeme sami', 'vlastní doprava']): 
+                    return 'Vlastní doprava'
+                if re.search('osobní|odběr|vyzvednutí|prodejna|sklad', text): 
+                    return 'Osobní odběr'
                 return 'Běžná doprava'
 
             df_orders = df_praha.groupby(['code', 'rok', 'mesic']).agg({
                 'itemTotalPriceWithoutVat': 'sum',
                 'itemName': lambda x: ' '.join(x.astype(str))
             }).reset_index()
+            
             df_orders['Typ_dopravy'] = df_orders['itemName'].apply(urci_kategorii)
 
             # --- FILTRY OBDOBÍ ---
@@ -500,17 +501,17 @@ else:
             c_f1, c_f2 = st.columns(2)
             with c_f1:
                 st.markdown("**Období A (Základní)**")
-                rok_a = st.selectbox("Rok A:", roky_list, index=min(1, len(roky_list)-1), key="rok_a")
+                rok_a = st.selectbox("Rok A:", roky_list, index=min(1, len(roky_list)-1) if len(roky_list) > 1 else 0, key="rok_a")
                 mesice_a = st.multiselect("Měsíce A (nechte prázdné pro celý rok):", mesice_list, key="mes_a")
             with c_f2:
                 st.markdown("**Období B (Srovnávané)**")
                 rok_b = st.selectbox("Rok B:", roky_list, index=0, key="rok_b")
                 mesice_b = st.multiselect("Měsíce B (nechte prázdné pro celý rok):", mesice_list, key="mes_b")
 
-            # Logika filtrování
             def filtruj_obdobi(df_in, rok, mesice):
                 res = df_in[df_in['rok'] == rok]
-                if mesice: res = res[res['mesic'].isin(mesice)]
+                if mesice: 
+                    res = res[res['mesic'].isin(mesice)]
                 return res
 
             df_a = filtruj_obdobi(df_orders, rok_a, mesice_a)
@@ -558,7 +559,6 @@ else:
                     c2.write(f"**{rok_b}**")
                     c2.write(f"{t_kb:,.0f} Kč".replace(',',' '))
                     
-                    # Procentuální změna
                     zmena_t = ((t_kb - t_ka) / t_ka * 100) if t_ka > 0 else 0
                     color = "green" if zmena_t > 0 else "red"
                     c3.write("**Změna tržeb**")
