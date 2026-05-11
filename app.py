@@ -1,16 +1,10 @@
-
 import streamlit as st
 import pandas as pd
-import re
-import unicodedata
-from fpdf import FPDF
+import requests
 import xml.etree.ElementTree as ET
 import time
 from io import StringIO, BytesIO
 import re
-import unicodedata
-from fpdf import FPDF
-
 
 # --- KONFIGURACE STRÁNKY ---
 st.set_page_config(page_title="Ziskovost E-shopu | PRO", page_icon="📈", layout="wide")
@@ -37,60 +31,6 @@ except KeyError as e:
     st.error(f"❌ Chybí bezpečnostní nastavení (Secrets) ve Streamlitu pro klíč: {e}")
     st.stop()
 
-
-# --- POMOCNÉ FUNKCE PRO PDF ---
-def remove_accents(input_str):
-    """Odstraní diakritiku pro bezpečný export do základního PDF fontu."""
-    if not isinstance(input_str, str): return str(input_str)
-    nfkd_form = unicodedata.normalize('NFKD', input_str)
-    return u"".join([c for c in nfkd_form if not unicodedata.combining(c)])
-
-def create_praha_pdf(df_pivot_trzby, df_pivot_objednavky, roky):
-    """Vygeneruje PDF report."""
-    pdf = FPDF(orientation="L", unit="mm", format="A4")
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 16)
-    
-    pdf.cell(0, 10, remove_accents("REPORT PRODEJU - PRAHA (Mezirocni srovnani)"), ln=True, align="C")
-    pdf.ln(10)
-    
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 10, remove_accents("TRZBY BEZ DPH (v CZK)"), ln=True)
-    pdf.set_font("helvetica", "", 10)
-    
-    pdf.cell(30, 10, remove_accents("Mesic"), border=1)
-    for rok in roky:
-        pdf.cell(40, 10, str(rok), border=1, align="R")
-    pdf.ln()
-    
-    for index, row in df_pivot_trzby.iterrows():
-        pdf.cell(30, 10, str(index), border=1)
-        for rok in roky:
-            val = row.get(rok, 0)
-            formatted_val = f"{val:,.0f}".replace(",", " ") if pd.notna(val) else "0"
-            pdf.cell(40, 10, formatted_val, border=1, align="R")
-        pdf.ln()
-        
-    pdf.ln(10)
-    pdf.set_font("helvetica", "B", 12)
-    pdf.cell(0, 10, remove_accents("POCET OBJEDNAVEK"), ln=True)
-    pdf.set_font("helvetica", "", 10)
-    
-    pdf.cell(30, 10, remove_accents("Mesic"), border=1)
-    for rok in roky:
-        pdf.cell(40, 10, str(rok), border=1, align="R")
-    pdf.ln()
-    
-    for index, row in df_pivot_objednavky.iterrows():
-        pdf.cell(30, 10, str(index), border=1)
-        for rok in roky:
-            val = row.get(rok, 0)
-            formatted_val = f"{val:.0f}" if pd.notna(val) else "0"
-            pdf.cell(40, 10, formatted_val, border=1, align="R")
-        pdf.ln()
-        
-    return pdf.output()
-
 # --- POMOCNÉ FUNKCE ---
 def extract_month(d):
     m_iso = re.search(r'(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})', str(d))
@@ -107,7 +47,7 @@ def extract_year(d):
     return None
 
 def clean_money(column_data):
-    cleaned = column_data.astype(str).str.replace('"', '').str.replace(r'[\s ]+', '', regex=True).str.replace(',', '.')
+    cleaned = column_data.astype(str).str.replace('"', '').str.replace(r'[\s\xa0]+', '', regex=True).str.replace(',', '.')
     return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 # --- CACHE: XML FEED SHOPTET ---
@@ -150,7 +90,7 @@ def load_xml_feed(url, dph_sazba=21, ceny_s_dph=True):
         st.error(f"⚠️ Chyba při stahování XML feedu ze Shoptetu: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_xml'])
 
-# --- CACHE: CÉZAR XML ---
+# --- CACHE: CÉZAR XML (125 MB EFEKTIVNĚ S CHYTRÝM PŘEPOČTEM JEDNOTEK) ---
 @st.cache_data
 def load_cezar_xml(file_bytes):
     def parse_cislo(hodnota):
@@ -181,22 +121,39 @@ def load_cezar_xml(file_bytes):
                 vybrana_nc = ncp if ncp > 0 else (nca if nca > 0 else nc)
                 
                 if vybrana_nc > 0:
+                    # --- CHYTRÝ PŘEPOČET PODLE MĚRNÉ JEDNOTKY ---
                     jednotka = (elem.get('jednotka') or elem.findtext('jednotka') or '').strip().lower()
+                    
+                    # 1. METRÁŽ: Cena v Cézaru je za běžný metr (bm/m), ale my prodáváme na m2
                     if jednotka in ['bm', 'm']:
                         sirka = parse_cislo(elem.get('Sirka') or elem.findtext('Sirka'))
                         if sirka > 0:
                             vybrana_nc = vybrana_nc / (sirka / 100.0)
+                            
+                    # 2. BALENÍ (např. Vinyly): Cena v Cézaru je za krabici, my chceme m2
                     elif jednotka in ['bal', 'bal.', 'karton']:
                         baleni_zakl = parse_cislo(elem.get('BaleniZakl') or elem.findtext('BaleniZakl'))
                         if baleni_zakl > 0:
                             vybrana_nc = vybrana_nc / baleni_zakl
-                    cezar_data.append({'itemCode': str(kod).strip(), 'nc_cezar': vybrana_nc})
+                            
+                    # 3. Kusovky a hotové m2 se automaticky přeskočí a nákupka zůstane původní!
+                    # -----------------------------------------------------------
+
+                    cezar_data.append({
+                        'itemCode': str(kod).strip(),
+                        'nc_cezar': vybrana_nc
+                    })
+                
                 elem.clear()
+                
         df_cezar = pd.DataFrame(cezar_data)
+        
         if df_cezar.empty:
             return pd.DataFrame(columns=['itemCode', 'nc_cezar'])
+            
         df_cezar = df_cezar.drop_duplicates(subset=['itemCode'], keep='last')
         return df_cezar
+
     except Exception as e:
         st.error(f"⚠️ Chyba při zpracování Cézar XML: {e}")
         return pd.DataFrame(columns=['itemCode', 'nc_cezar'])
@@ -210,10 +167,13 @@ def load_orders(url):
         response = requests.get(clean_url, headers=headers, timeout=45)
         response.raise_for_status()
         response.encoding = 'cp1250' 
+        
         df = pd.read_csv(StringIO(response.text), sep=';', decimal=',', quotechar='"', on_bad_lines='skip', low_memory=False)
+        
         df['itemTotalPriceWithoutVat'] = clean_money(df['itemTotalPriceWithoutVat'])
         df['itemAmount'] = clean_money(df['itemAmount'])
         df['itemCode'] = df['itemCode'].astype(str).str.strip()
+        
         if 'date' in df.columns:
             df['date_str'] = df['date'].astype(str).str.strip().str.replace('"', '')
             df['rok'] = df['date_str'].apply(extract_year)
@@ -230,6 +190,7 @@ def process_uploaded_file(file_bytes):
     df['itemTotalPriceWithoutVat'] = clean_money(df['itemTotalPriceWithoutVat'])
     df['itemAmount'] = clean_money(df['itemAmount'])
     df['itemCode'] = df['itemCode'].astype(str).str.strip()
+    
     if 'date' in df.columns:
         df['date_str'] = df['date'].astype(str).str.strip().str.replace('"', '')
         df['rok'] = df['date_str'].apply(extract_year)
@@ -251,12 +212,7 @@ if not st.session_state.authenticated:
             st.error("❌ Chybné heslo! Zkuste to znovu.")
 else:
     # --- HLAVNÍ APLIKACE ---
-    
-    # --- HLAVNÍ APLIKACE ROZDĚLENÁ NA ZÁLOŽKY ---
-    tab_zisk, tab_praha = st.tabs(["💰 Analýza Zisku (Aktuální)", "🏙️ Report Praha (Meziroční)"])
-
-    with tab_zisk:
-        st.title("Analýza zisku")
+    st.title("Analýza zisku")
 
     with st.expander("📖 JAK SYSTÉM FUNGUJE"):
         st.markdown("""
@@ -265,7 +221,7 @@ else:
         3. **Integrace Cézara:** Můžete nahrát XML z Cézara (až 125 MB). Systém automaticky upřednostní aktuální nákupní cenu z něj a chytře přepočítá balení/metráž podle měrné jednotky.
         4. **Výběr období:** Zvolte si Rok a Měsíc pro analýzu.
         5. **Doplnění NC:** V tabulce doplňte chybějící ceny. Ukládají se napořád do Google Tabulky (Tato tabulka má absolutní prioritu).
-        """, unsafe_allow_html=True)
+        """)
 
     # --- SIDEBAR ---
     st.sidebar.header("⚙️ Nastavení datového feedu")
@@ -286,20 +242,23 @@ else:
         except:
             pamet_df = pd.DataFrame(columns=["itemCode", "nakupni_cena", "koeficient"])
 
+    # Nahrávací políčka (dvou-sloupcový layout)
     col_up1, col_up2 = st.columns(2)
     with col_up1:
         uploaded_file = st.file_uploader("Nahrát CSV s objednávkami ručně (volitelné)", type=['csv'])
     with col_up2:
         cezar_file = st.file_uploader("Nahrát XML export z Cézara (volitelné, např. 125 MB)", type=['xml'])
 
+    # Zpracování Cézara
     if cezar_file:
-        with st.spinner("Zpracovávám data z Cézara..."):
+        with st.spinner("Zpracovávám data z Cézara... (může to chvíli trvat)"):
             df_cezar = load_cezar_xml(cezar_file.getvalue())
             if not df_cezar.empty:
                 st.success(f"✅ Data z Cézara úspěšně načtena (nalezeno {len(df_cezar)} unikátních položek s cenou).")
     else:
         df_cezar = pd.DataFrame(columns=['itemCode', 'nc_cezar'])
 
+    # Zpracování objednávek
     if uploaded_file:
         df_vsechny_objednavky = process_uploaded_file(uploaded_file.getvalue())
     else:
@@ -337,6 +296,7 @@ else:
             
         if 'statusName' in df_vsechny_objednavky.columns and vybrane_stavy:
             df_filtr = df_filtr[df_filtr['statusName'].isin(vybrane_stavy)]
+
     else:
         st.error("Nepodařilo se načíst data o datumech z e-shopu.")
         st.stop()
@@ -346,9 +306,17 @@ else:
     else:
         # --- 3. KONTROLA CEN ---
         unikaty = df_filtr[df_filtr['itemCode'] != 'nan'].drop_duplicates(subset=['itemCode'])[['itemCode', 'itemName']].copy()
+        
+        # Merge dat z feedu Shoptetu
         editor_prep = pd.merge(unikaty, df_xml, on='itemCode', how='left')
+        
+        # Merge dat z Cézara
         editor_prep = pd.merge(editor_prep, df_cezar, on='itemCode', how='left')
+        
+        # Merge ručních dat z Google Sheets
         editor_prep = pd.merge(editor_prep, pamet_df[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
+        
+        # Prioritizace cen (Ruční Tabulka -> Cézar -> Shoptet XML -> 0.0)
         editor_prep['finalni_nc'] = (
             editor_prep['nakupni_cena']
             .fillna(editor_prep['nc_cezar'])
@@ -356,10 +324,13 @@ else:
             .fillna(0.0)
         )
         editor_prep['koeficient'] = editor_prep['koeficient'].fillna(1.0)
+        
         tabulka_pro_editor = editor_prep[['itemCode', 'itemName', 'finalni_nc', 'koeficient']].copy()
         tabulka_pro_editor.rename(columns={'finalni_nc': 'nakupni_cena'}, inplace=True)
 
         st.subheader("📝 2. Kontrola nákupních cen (BEZ DPH)")
+        st.info("Produkty prodané ve vybraném období. Zobrazují se předvyplněné hodnoty (Priorita: Vaše ruční oprava > Cézar > Shoptet). Pokud cena chybí (0.00), doplňte ji.")
+        
         tabulka_pro_editor = tabulka_pro_editor.sort_values(by=['nakupni_cena', 'itemName'], ascending=[True, True]).reset_index(drop=True)
 
         final_editor = st.data_editor(
@@ -378,89 +349,62 @@ else:
         # --- 4. FINÁLNÍ VÝPOČET ---
         if st.button("🚀 SPOČÍTAT ZISK ZA VYBRANÉ OBDOBÍ A ULOŽIT", type="primary"):
             with st.status("Zpracovávám prodeje...", expanded=True) as status:
+                
                 aktualni_nc = tabulka_pro_editor.copy()
                 state = st.session_state.get("cenovy_editor", {})
                 if "edited_rows" in state:
                     for idx, changes in state["edited_rows"].items():
                         for col, val in changes.items():
                             aktualni_nc.at[int(idx), col] = val
+
                 df_vypocet = df_filtr.copy()
+                if 'nakupni_cena' in df_vypocet.columns:
+                    df_vypocet = df_vypocet.rename(columns={'nakupni_cena': 'nc_stara_z_csv'})
+
                 final_merged = pd.merge(df_vypocet, aktualni_nc[['itemCode', 'nakupni_cena', 'koeficient']], on='itemCode', how='left')
+                
                 final_merged['nakupni_cena'] = pd.to_numeric(final_merged['nakupni_cena']).fillna(0)
                 final_merged['koeficient'] = pd.to_numeric(final_merged['koeficient']).fillna(1)
+                
                 final_merged['naklad_radek'] = final_merged['itemAmount'] * final_merged['nakupni_cena'] * final_merged['koeficient']
+
                 total_trzby = final_merged['itemTotalPriceWithoutVat'].sum()
                 total_naklady_zbozi = final_merged['naklad_radek'].sum()
                 total_cisty_zisk = total_trzby - total_naklady_zbozi - mkt_cost - doprava_cost
+
                 time.sleep(1)
                 status.update(label="Kompletně spočítáno!", state="complete", expanded=False)
 
+            # --- VÝSLEDKY ---
             st.divider()
-            if total_cisty_zisk > 0: st.balloons()
+            
+            # 🎈 SPUSŤ BALÓNKY, POKUD JSME V PLUSU!
+            if total_cisty_zisk > 0:
+                st.balloons()
+                
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("TRŽBY (bez DPH)", f"{total_trzby:,.0f} Kč".replace(',', ' '))
             c2.metric("NÁKLADY ZBOŽÍ (bez DPH)", f"{total_naklady_zbozi:,.0f} Kč".replace(',', ' '), delta=f"-{total_naklady_zbozi:,.0f}", delta_color="inverse")
             c3.metric("HRUBÁ MARŽE", f"{(total_trzby - total_naklady_zbozi):,.0f} Kč".replace(',', ' '))
+            
             barva = "normal" if total_cisty_zisk > 0 else "inverse"
             c4.metric("ČISTÝ ZISK", f"{total_cisty_zisk:,.0f} Kč".replace(',', ' '), delta=f"{total_cisty_zisk:,.0f} Kč", delta_color=barva)
 
-            if total_cisty_zisk <= 0: st.error("Vybrané období končí ve ztrátě!")
-            with st.expander("🔍 DETAILNÍ ROZPIS"):
-                st.dataframe(final_merged, use_container_width=True)
+            if total_cisty_zisk <= 0:
+                st.error("Vybrané období končí ve ztrátě!")
+
+            # --- ROZPIS PO POLOŽKÁCH ---
+            with st.expander("🔍 DETAILNÍ ROZPIS (Tržba bez DPH vs Náklad bez DPH)"):
+                kontrola_df = final_merged[['itemCode', 'itemName', 'statusName', 'itemAmount', 'itemTotalPriceWithoutVat', 'nakupni_cena', 'naklad_radek']].copy()
+                kontrola_df.columns = ['Kód', 'Produkt', 'Stav', 'Množství', 'TRŽBA (bez DPH)', 'NC / ks (bez DPH)', 'NÁKLAD (Celkem)']
+                st.dataframe(kontrola_df, use_container_width=True)
+
+            # --- ULOŽENÍ DO GOOGLE SHEETS ---
             try:
                 from streamlit_gsheets import GSheetsConnection
                 conn = st.connection("gsheets", type=GSheetsConnection)
                 k_ulozeni = aktualni_nc[aktualni_nc['nakupni_cena'] > 0]
                 update_db = pd.concat([pamet_df, k_ulozeni[['itemCode', 'nakupni_cena', 'koeficient']]]).drop_duplicates(subset=['itemCode'], keep='last')
                 conn.update(spreadsheet=URL_CSV_GSHEETS, data=update_db)
-            except: pass
-
-    with tab_praha:
-        st.title("🏙️ Komplexní analýza prodejů: Praha")
-        st.markdown("Srovnání měsíců a let pro fakturační nebo doručovací adresu v Praze.")
-        
-        if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
-            df = df_vsechny_objednavky.copy()
-            for col in ['billCity', 'deliveryCity']:
-                if col not in df.columns: df[col] = ""
-                df[col] = df[col].astype(str).fillna('')
-            
-            mask_praha = df['billCity'].str.contains('Praha|Prague', case=False) | df['deliveryCity'].str.contains('Praha|Prague', case=False)
-            df_praha = df[mask_praha].copy()
-            
-            if 'statusName' in df_praha.columns:
-                df_praha = df_praha[~df_praha['statusName'].str.contains('storno', case=False, na=False)]
-            
-            if df_praha.empty:
-                st.warning("V datech nebyly nalezeny žádné relevantní objednávky pro Prahu.")
-            else:
-                df_praha_orders = df_praha.groupby(['code', 'rok', 'mesic']).agg({'itemTotalPriceWithoutVat': 'sum'}).reset_index()
-                report = df_praha_orders.groupby(['rok', 'mesic']).agg(
-                    trzby=('itemTotalPriceWithoutVat', 'sum'),
-                    pocet_objednavek=('code', 'nunique')
-                ).reset_index()
-                
-                report['rok'] = report['rok'].astype(int)
-                report['mesic'] = report['mesic'].astype(int)
-                roky_list = sorted(report['rok'].unique())
-                
-                pivot_trzby = report.pivot(index='mesic', columns='rok', values='trzby').fillna(0)
-                pivot_objednavky = report.pivot(index='mesic', columns='rok', values='pocet_objednavek').fillna(0)
-                
-                if len(roky_list) >= 2:
-                    akt_rok = roky_list[-1]; pred_rok = roky_list[-2]
-                    pivot_trzby[f'YoY % ({pred_rok}->{akt_rok})'] = (pivot_trzby[akt_rok] - pivot_trzby[pred_rok]) / pivot_trzby[pred_rok].replace(0, pd.NA) * 100
-                    pivot_objednavky[f'YoY % ({pred_rok}->{akt_rok})'] = (pivot_objednavky[akt_rok] - pivot_objednavky[pred_rok]) / pivot_objednavky[pred_rok].replace(0, pd.NA) * 100
-
-                st.subheader("💰 Tržby bez DPH v měsících")
-                st.dataframe(pivot_trzby, use_container_width=True)
-                st.bar_chart(pivot_trzby[roky_list])
-                
-                st.subheader("📦 Počet objednávek v měsících")
-                st.dataframe(pivot_objednavky, use_container_width=True)
-                
-                st.divider()
-                pdf_output = create_praha_pdf(pivot_trzby[roky_list], pivot_objednavky[roky_list], roky_list)
-                st.download_button(label="⬇️ Stáhnout PDF Report", data=pdf_output, file_name="report_praha.pdf", mime="application/pdf")
-        else:
-            st.info("Nahrajte nebo stáhněte prosím CSV s objednávkami v hlavní záložce.")
+            except Exception as e:
+                pass
