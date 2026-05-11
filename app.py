@@ -458,7 +458,7 @@ else:
         if 'df_vsechny_objednavky' in locals() and not df_vsechny_objednavky.empty:
             df = df_vsechny_objednavky.copy()
             
-            # 1. Filtrování na Prahu
+            # 1. Filtrování na Prahu (hledáme v doručovací i fakturační adrese)
             for col in ['billCity', 'deliveryCity']:
                 if col not in df.columns:
                     df[col] = ""
@@ -471,13 +471,19 @@ else:
             if 'statusName' in df_praha.columns:
                 df_praha = df_praha[~df_praha['statusName'].str.contains('storno|zrušen', case=False, na=False)]
 
-            # 3. Rozdělení DOPRAVA vs OSOBNÍ ODBĚR
-            if 'shippingName' not in df_praha.columns:
-                df_praha['shippingName'] = ""
-                
+            # 3. Rozdělení DOPRAVA vs OSOBNÍ ODBĚR (Chytřejší detekce dle položek košíku)
             osobni_klicova_slova = 'osobní|odběr|vyzvednutí|prodejna|sklad'
-            df_praha['typ_logistiky'] = df_praha['shippingName'].apply(
-                lambda x: 'Osobní odběr' if re.search(osobni_klicova_slova, str(x), re.IGNORECASE) else 'Doprava'
+            
+            # Najdeme kódy všech objednávek, které obsahují položku "Osobní odběr" atd.
+            if 'itemName' in df_praha.columns:
+                mask_osobni = df_praha['itemName'].astype(str).str.contains(osobni_klicova_slova, flags=re.IGNORECASE, regex=True, na=False)
+                kody_osobnich_odberu = df_praha[mask_osobni]['code'].unique()
+            else:
+                kody_osobnich_odberu = []
+
+            # Přidělíme typ logistiky celé objednávce
+            df_praha['typ_logistiky'] = df_praha['code'].apply(
+                lambda k: 'Osobní odběr' if k in kody_osobnich_odberu else 'Doprava'
             )
 
             if df_praha.empty:
@@ -499,9 +505,9 @@ else:
                     df_final = df_praha[df_praha['typ_logistiky'] == 'Osobní odběr']
 
                 if df_final.empty:
-                    st.warning(f"Pro zvolený typ ({typ_view}) nejsou v Praze žádná data.")
+                    st.warning(f"Pro zvolený typ ({typ_view}) nejsou v Praze aktuálně žádná data.")
                 else:
-                    # Agregace dat (nejprve seskupit položky jedné objednávky)
+                    # Agregace dat (nejprve sečteme položky uvnitř jedné objednávky, abychom nenásobili počty)
                     order_agg = df_final.groupby(['code', 'rok', 'mesic']).agg({'itemTotalPriceWithoutVat': 'sum'}).reset_index()
                     report = order_agg.groupby(['rok', 'mesic']).agg(
                         trzby=('itemTotalPriceWithoutVat', 'sum'),
