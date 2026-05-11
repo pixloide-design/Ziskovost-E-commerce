@@ -4,7 +4,6 @@ import pandas as pd
 import re
 import unicodedata
 from fpdf import FPDF
-quests
 import xml.etree.ElementTree as ET
 import time
 from io import StringIO, BytesIO
