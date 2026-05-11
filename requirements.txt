@@ -1,2 +1,4 @@
 pandas
 st-gsheets-connection
+requests
+fpdf2
